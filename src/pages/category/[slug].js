@@ -38,7 +38,11 @@ export default function CategoryPage() {
         if (p === 1) {
           setContent(data.items || []);
         } else {
-          setContent(prev => [...prev, ...(data.items || [])]);
+          setContent(prev => {
+            const existing = new Set(prev.map(i => i.id));
+            const newItems = (data.items || []).filter(i => !existing.has(i.id));
+            return [...prev, ...newItems];
+          });
         }
         setHasMore(data.hasMore || false);
       }

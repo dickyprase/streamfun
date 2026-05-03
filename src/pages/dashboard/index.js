@@ -107,7 +107,7 @@ export default function UserDashboard() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.05 }}
                 >
-                  <Link href={`/detail/${item.content_id}?id=${item.content_id}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
+                  <Link href={`/detail/${item.content_slug || item.content_id}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
                     <div className="w-16 h-10 rounded bg-dark-400 overflow-hidden flex-shrink-0">
                       {item.content_poster && (
                         <img src={item.content_poster} alt="" className="w-full h-full object-cover" />

@@ -109,7 +109,7 @@ export default function LibraryPage() {
                   transition={{ delay: index * 0.05 }}
                   className="relative group"
                 >
-                  <Link href={`/detail/${item.slug || item.id}?id=${item.id}`}>
+                  <Link href={`/detail/${item.slug || item.id}`}>
                     <div className="card cursor-pointer hover:ring-2 hover:ring-primary-500/50 transition-all duration-300">
                       <div className="relative aspect-[2/3] overflow-hidden bg-dark-400">
                         <img

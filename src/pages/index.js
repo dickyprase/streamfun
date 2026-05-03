@@ -88,7 +88,17 @@ export default function Home() {
       const res = await fetch('/api/proxy/trending?page=1');
       if (res.ok) {
         const data = await res.json();
-        setContent(data.items || []);
+        // Remove duplicates by id
+        const items = data.items || [];
+        const unique = [];
+        const seen = new Set();
+        for (const item of items) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id);
+            unique.push(item);
+          }
+        }
+        setContent(unique);
       }
     } catch {}
     setLoading(false);

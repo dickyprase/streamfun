@@ -131,6 +131,14 @@ export function useVideoPlayer({ src, autoPlay = false }: UseVideoPlayerProps) {
   }, []);
 
   // ─── Video Event Listeners ─────────────────────────────────
+  // Pakai state flag untuk trigger re-attach saat video element tersedia
+  const [videoReady, setVideoReady] = useState(false);
+
+  // Callback ref untuk detect kapan video element mount/unmount
+  const setVideoRef = useCallback((node: HTMLVideoElement | null) => {
+    (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = node;
+    setVideoReady(!!node);
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -163,7 +171,7 @@ export function useVideoPlayer({ src, autoPlay = false }: UseVideoPlayerProps) {
         video.removeEventListener(event, handler);
       });
     };
-  }, []);
+  }, [videoReady]);
 
   // Listen for fullscreen changes
   useEffect(() => {
@@ -179,15 +187,16 @@ export function useVideoPlayer({ src, autoPlay = false }: UseVideoPlayerProps) {
     };
   }, []);
 
-  // Reset error state when src changes
+  // Reset error + loading state when src changes
   useEffect(() => {
     if (src) {
-      setState(s => ({ ...s, error: false }));
+      setState(s => ({ ...s, error: false, loading: true }));
     }
   }, [src]);
 
   return {
     videoRef,
+    setVideoRef,
     containerRef,
     state,
     actions: {

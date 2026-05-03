@@ -108,7 +108,7 @@ export default function HeroBanner({ banners = [] }) {
 
             {/* Buttons */}
             <div className="flex items-center gap-3 pt-2">
-              <Link href={`/detail/${item.slug || item.id}?id=${item.id}`}>
+              <Link href={`/detail/${item.slug || item.id}`}>
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
@@ -120,7 +120,7 @@ export default function HeroBanner({ banners = [] }) {
                   Tonton Sekarang
                 </motion.button>
               </Link>
-              <Link href={`/detail/${item.slug || item.id}?id=${item.id}`}>
+              <Link href={`/detail/${item.slug || item.id}`}>
                 <motion.button
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}

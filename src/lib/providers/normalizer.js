@@ -17,16 +17,10 @@ export function normalizeContentItem(item) {
     || item.totalEpisode
     || 0;
 
-  // Extract slug from detailUrl: "https://moviebox.ph/detail/demon-city-8kalkgNflh9" → "demon-city-8kalkgNflh9"
-  let slug = '';
-  if (item.detailUrl) {
-    const match = item.detailUrl.match(/\/detail\/(.+)$/);
-    if (match) slug = match[1];
-  }
-  if (!slug) {
-    // Generate slug from title + id suffix
-    slug = (item.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + (item.subjectId || '').slice(-8);
-  }
+  // Generate slug: judul-film-{fullId}
+  // ID di-embed di slug agar detail page bisa extract tanpa query param
+  const titleSlug = (item.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const slug = titleSlug ? `${titleSlug}-${item.subjectId}` : String(item.subjectId);
 
   return {
     id: item.subjectId,
@@ -72,13 +66,23 @@ export function normalizeDetailItem(item) {
       maxEpisode: s.maxEp,
       resolutions: s.resolutions || [],
     })),
-    dubs: (item.dubs || []).map(d => ({
-      id: d.subjectId,
-      name: d.lanName,
-      code: d.lanCode,
-      isOriginal: d.original,
-      type: d.type, // 0=dub, 1=sub
-    })),
+    dubs: (() => {
+      const dubs = (item.dubs || []).map(d => ({
+        id: d.subjectId,
+        name: d.lanName,
+        code: d.lanCode,
+        isOriginal: d.original,
+        type: d.type, // 0=dub, 1=sub
+      }));
+      // Deduplicate by id+code combination (same subjectId can appear for different languages)
+      const seen = new Set();
+      return dubs.filter(d => {
+        const key = `${d.id}-${d.code}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    })(),
     trailer: item.trailer ? {
       url: item.trailer.VideoAddress?.url || '',
       cover: item.trailer.cover?.url || '',
@@ -305,17 +309,27 @@ export function normalizeSearchResults(data) {
  * Normalize trending results
  */
 export function normalizeTrendingResults(data) {
+  const allItems = (data.items || [])
+    .filter(item => item && (item.subject || item.subjectId))
+    .map(item => {
+      try {
+        return normalizeContentItem(item.subject || item);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  // Deduplicate by id
+  const seen = new Set();
+  const items = allItems.filter(item => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+
   return {
-    items: (data.items || [])
-      .filter(item => item && (item.subject || item.subjectId))
-      .map(item => {
-        try {
-          return normalizeContentItem(item.subject || item);
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean),
+    items,
     hasMore: data.pager?.hasMore || false,
     nextPage: data.pager?.nextPage || null,
   };

@@ -11,7 +11,7 @@ import useLocalStorage from '@/hooks/useLocalStorage';
 
 export default function DetailPage() {
   const router = useRouter();
-  const { slug, id: queryId } = router.query;
+  const { slug } = router.query;
   const { isAuthenticated, siteSettings } = useAuth();
   const [item, setItem] = useState(null);
   const [playData, setPlayData] = useState(null);
@@ -24,30 +24,30 @@ export default function DetailPage() {
   const [playLoading, setPlayLoading] = useState(false);
   const [contentId, setContentId] = useState(null);
 
-  // Resolve the content ID from query param or slug
+  // Extract content ID dari slug (format: judul-film-{id})
+  // ID adalah segment angka panjang di akhir slug
   useEffect(() => {
     if (!slug) return;
-    if (queryId) {
-      setContentId(queryId);
+    const match = slug.match(/(\d{6,})$/);
+    if (match) {
+      setContentId(match[1]);
     } else {
-      // Try to search by slug title (extract title from slug)
-      const titlePart = slug.replace(/-[^-]+$/, '').replace(/-/g, ' ');
-      resolveIdFromSearch(titlePart);
+      // Fallback: coba search kalau format slug lama
+      resolveIdFromSearch(slug);
     }
-  }, [slug, queryId]);
+  }, [slug]);
 
-  const resolveIdFromSearch = async (title) => {
+  const resolveIdFromSearch = async (slugStr) => {
+    const titlePart = slugStr.replace(/-[^-]+$/, '').replace(/-/g, ' ');
     try {
-      const res = await fetch(`/api/proxy/search?q=${encodeURIComponent(title)}&page=1`);
+      const res = await fetch(`/api/proxy/search?q=${encodeURIComponent(titlePart)}&page=1`);
       if (res.ok) {
         const data = await res.json();
-        // Find matching item by slug
-        const match = data.items?.find(i => i.slug === slug);
+        const match = data.items?.find(i => i.slug === slugStr);
         if (match) {
           setContentId(match.id);
           return;
         }
-        // Fallback: use first result
         if (data.items?.[0]) {
           setContentId(data.items[0].id);
           return;
@@ -83,6 +83,7 @@ export default function DetailPage() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 content_id: contentId,
+                content_slug: slug,
                 content_title: json.data?.title,
                 content_poster: json.data?.poster,
               }),
@@ -101,7 +102,17 @@ export default function DetailPage() {
         const res = await fetch(`/api/proxy/recommendations?type=similar&id=${contentId}`);
         if (res.ok) {
           const json = await res.json();
-          setRelated(json.items || []);
+          // Remove duplicates by id
+          const items = json.items || [];
+          const unique = [];
+          const seen = new Set();
+          for (const item of items) {
+            if (!seen.has(item.id)) {
+              seen.add(item.id);
+              unique.push(item);
+            }
+          }
+          setRelated(unique);
         }
       } catch {}
     })();
@@ -111,19 +122,30 @@ export default function DetailPage() {
   const fetchPlay = useCallback(async (season, episode) => {
     if (!contentId) return;
     setPlayLoading(true);
+    console.log('[DEBUG fetchPlay] Request:', { contentId, season, episode });
     try {
       const res = await fetch(`/api/proxy/play?id=${contentId}&season=${season}&episode=${episode}`);
+      const json = await res.json();
+      console.log('[DEBUG fetchPlay] Response status:', res.status);
+      console.log('[DEBUG fetchPlay] Response data:', JSON.stringify(json, null, 2));
       if (res.ok) {
-        const json = await res.json();
         setPlayData(json.data);
+        console.log('[DEBUG fetchPlay] Qualities:', json.data?.qualities);
+        console.log('[DEBUG fetchPlay] Video URL:', json.data?.videoUrl);
+        console.log('[DEBUG fetchPlay] Subtitles:', json.data?.subtitles);
         // Set default quality to highest
         if (json.data?.qualities?.length > 0) {
           const highest = json.data.qualities[json.data.qualities.length - 1];
+          console.log('[DEBUG fetchPlay] Selected quality:', highest);
           setCurrentQuality(highest);
+        } else {
+          console.warn('[DEBUG fetchPlay] Tidak ada qualities tersedia!');
         }
+      } else {
+        console.error('[DEBUG fetchPlay] Response error:', json);
       }
     } catch (err) {
-      console.error('Failed to fetch play:', err);
+      console.error('[DEBUG fetchPlay] Fetch gagal:', err);
     }
     setPlayLoading(false);
   }, [contentId]);
@@ -137,7 +159,9 @@ export default function DetailPage() {
       episode: String(currentEpisode),
     });
     if (resolution) params.set('resolution', String(resolution));
-    return `/api/proxy/stream?${params.toString()}`;
+    const url = `/api/proxy/stream?${params.toString()}`;
+    console.log('[DEBUG getStreamUrl]', { resolution, url });
+    return url;
   }, [contentId, currentSeason, currentEpisode]);
 
   // Auto-fetch play data when detail loads
@@ -160,7 +184,8 @@ export default function DetailPage() {
   const handleEpisodeSelect = (ep) => {
     setCurrentEpisode(ep.number);
     setPlayData(null);
-    setCurrentQuality(null);
+    // Jangan reset quality ke null — biarkan quality lama dipakai
+    // sampai fetchPlay selesai dan set quality baru
     fetchPlay(currentSeason, ep.number);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -169,7 +194,6 @@ export default function DetailPage() {
     setCurrentSeason(season);
     setCurrentEpisode(1);
     setPlayData(null);
-    setCurrentQuality(null);
     fetchPlay(season, 1);
   };
 
@@ -293,8 +317,8 @@ export default function DetailPage() {
               {item.dubs && item.dubs.length > 1 && (
                 <div className="flex flex-wrap gap-2 mb-4">
                   <span className="text-xs text-gray-500 self-center">Audio:</span>
-                  {item.dubs.map(d => (
-                    <Link key={d.id} href={`/detail/${slug}?id=${d.id}`}>
+                  {item.dubs.map((d, idx) => (
+                    <Link key={`${d.id}-${d.code || idx}`} href={`/detail/${slug.replace(/\d{6,}$/, d.id)}`}>
                       <span className={`badge text-xs transition-colors cursor-pointer ${
                         d.id === contentId
                           ? 'bg-primary-500/30 text-primary-400 ring-1 ring-primary-500/50'
@@ -355,8 +379,8 @@ export default function DetailPage() {
                 <div className="mt-4">
                   <h4 className="text-sm font-semibold text-gray-400 mb-2">Cast</h4>
                   <div className="flex flex-wrap gap-2">
-                    {item.cast.slice(0, 10).map(actor => (
-                      <div key={actor.id} className="flex items-center gap-2 bg-dark-300 px-3 py-1.5 rounded-full">
+                    {item.cast.slice(0, 10).map((actor, idx) => (
+                      <div key={`${actor.id}-${idx}`} className="flex items-center gap-2 bg-dark-300 px-3 py-1.5 rounded-full">
                         {actor.avatar && (
                           <img src={actor.avatar} alt={actor.name} className="w-5 h-5 rounded-full object-cover" />
                         )}

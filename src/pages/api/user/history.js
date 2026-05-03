@@ -23,13 +23,18 @@ export default function handler(req, res) {
 
   // POST - Add to watch history
   if (req.method === 'POST') {
-    const { content_id, content_title, content_poster, progress } = req.body;
+    const { content_id, content_slug, content_title, content_poster, progress } = req.body;
 
     if (!content_id) {
       return res.status(400).json({ error: 'content_id is required' });
     }
 
     try {
+      // Ensure content_slug column exists (migration)
+      try {
+        db.prepare('ALTER TABLE watch_history ADD COLUMN content_slug TEXT DEFAULT \'\'').run();
+      } catch {} // Column already exists
+
       // Upsert - update if same content watched again
       const existing = db.prepare(
         'SELECT id FROM watch_history WHERE user_id = ? AND content_id = ?'
@@ -37,12 +42,12 @@ export default function handler(req, res) {
 
       if (existing) {
         db.prepare(
-          'UPDATE watch_history SET watched_at = datetime(\'now\'), progress = ?, content_title = ?, content_poster = ? WHERE id = ?'
-        ).run(progress || 0, content_title || '', content_poster || '', existing.id);
+          'UPDATE watch_history SET watched_at = datetime(\'now\'), progress = ?, content_title = ?, content_poster = ?, content_slug = ? WHERE id = ?'
+        ).run(progress || 0, content_title || '', content_poster || '', content_slug || '', existing.id);
       } else {
         db.prepare(
-          'INSERT INTO watch_history (user_id, content_id, content_title, content_poster, progress) VALUES (?, ?, ?, ?, ?)'
-        ).run(user.id, content_id, content_title || '', content_poster || '', progress || 0);
+          'INSERT INTO watch_history (user_id, content_id, content_slug, content_title, content_poster, progress) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(user.id, content_id, content_slug || '', content_title || '', content_poster || '', progress || 0);
       }
 
       return res.status(200).json({ message: 'History updated' });

@@ -1,10 +1,41 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
+
+const CHUNK_SIZE = 50;
 
 export default function EpisodeList({ episodes, currentEpisode, onEpisodeSelect }) {
   const [imageLoaded, setImageLoaded] = useState({});
 
+  // Buat daftar range (1-50, 51-100, dst)
+  const ranges = useMemo(() => {
+    if (!episodes || episodes.length === 0) return [];
+    const chunks = [];
+    for (let i = 0; i < episodes.length; i += CHUNK_SIZE) {
+      const start = i + 1;
+      const end = Math.min(i + CHUNK_SIZE, episodes.length);
+      chunks.push({ start, end, episodes: episodes.slice(i, i + CHUNK_SIZE) });
+    }
+    return chunks;
+  }, [episodes]);
+
+  // Auto-select range yang berisi episode aktif
+  const defaultRange = useMemo(() => {
+    if (!currentEpisode || ranges.length === 0) return 0;
+    return ranges.findIndex(r => currentEpisode >= r.start && currentEpisode <= r.end) || 0;
+  }, [currentEpisode, ranges]);
+
+  const [activeRange, setActiveRange] = useState(defaultRange);
+
+  // Update activeRange kalau currentEpisode berubah ke range lain
+  const currentRangeIdx = ranges.findIndex(r => currentEpisode >= r.start && currentEpisode <= r.end);
+  if (currentRangeIdx !== -1 && currentRangeIdx !== activeRange && currentRangeIdx !== defaultRange) {
+    // Tidak perlu auto-switch, biarkan user pilih manual
+  }
+
   if (!episodes || episodes.length === 0) return null;
+
+  const showRangeSelector = ranges.length > 1;
+  const visibleEpisodes = ranges[activeRange]?.episodes || [];
 
   return (
     <div className="space-y-3">
@@ -13,13 +44,39 @@ export default function EpisodeList({ episodes, currentEpisode, onEpisodeSelect 
         <span className="text-sm text-gray-400">{episodes.length} Episode</span>
       </div>
 
+      {/* Range selector */}
+      {showRangeSelector && (
+        <div className="flex flex-wrap gap-1.5">
+          {ranges.map((range, idx) => {
+            const isActive = idx === activeRange;
+            const hasPlaying = currentEpisode >= range.start && currentEpisode <= range.end;
+            return (
+              <button
+                key={idx}
+                onClick={() => setActiveRange(idx)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
+                  isActive
+                    ? 'bg-primary-500 text-white'
+                    : hasPlaying
+                    ? 'bg-primary-500/20 text-primary-400 ring-1 ring-primary-500/40'
+                    : 'bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white'
+                }`}
+              >
+                {range.start}-{range.end}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Episode list */}
       <div className="space-y-2 max-h-[500px] overflow-y-auto scrollbar-hide pr-1">
-        {episodes.map((ep, index) => (
+        {visibleEpisodes.map((ep, index) => (
           <motion.button
             key={ep.id}
             initial={{ opacity: 0, x: -10 }}
             animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: index * 0.03 }}
+            transition={{ delay: index * 0.02 }}
             onClick={() => onEpisodeSelect(ep)}
             className={`w-full flex gap-3 p-2 rounded-lg transition-all duration-200 text-left group ${
               currentEpisode === ep.number

@@ -12,7 +12,7 @@ export default function ContentCard({ item, index = 0 }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: index * 0.05, ease: 'easeOut' }}
     >
-      <Link href={`/detail/${item.slug || item.id}?id=${item.id}`}>
+      <Link href={`/detail/${item.slug || item.id}`}>
         <div className="card group cursor-pointer hover:ring-2 hover:ring-primary-500/50 hover:shadow-xl hover:shadow-primary-500/10 transition-all duration-300">
           {/* Poster */}
           <div className="relative aspect-[2/3] overflow-hidden bg-dark-400">

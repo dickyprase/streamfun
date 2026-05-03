@@ -24,9 +24,19 @@ export default function ContentGrid({ items, loading = false, columns = 'default
     );
   }
 
+  // Deduplicate items by id to prevent React key warnings
+  const uniqueItems = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      uniqueItems.push(item);
+    }
+  }
+
   return (
     <div className={gridClass}>
-      {items.map((item, index) => (
+      {uniqueItems.map((item, index) => (
         <ContentCard key={item.id} item={item} index={index} />
       ))}
     </div>

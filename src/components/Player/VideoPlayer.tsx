@@ -60,7 +60,7 @@ export default function VideoPlayer({
   autoPlay = false,
   className = '',
 }: VideoPlayerProps) {
-  const { videoRef, containerRef, state, actions } = useVideoPlayer({ src, autoPlay });
+  const { videoRef, setVideoRef, containerRef, state, actions } = useVideoPlayer({ src, autoPlay });
 
   // HLS instance
   const hlsRef = useRef<Hls | null>(null);
@@ -77,6 +77,7 @@ export default function VideoPlayer({
   // Resolved video URL (fresh from proxy)
   const [resolvedUrl, setResolvedUrl] = useState<string>('');
   const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState(false);
 
   // ─── Resolve fresh video URL from proxy ────────────────────
   // The src is a proxy URL like /api/proxy/stream?id=X&...
@@ -85,29 +86,44 @@ export default function VideoPlayer({
   useEffect(() => {
     if (!src) {
       setResolvedUrl('');
+      setResolveError(false);
+      setResolving(false);
       return;
     }
 
     // If src is already a direct video URL (not our proxy), use it directly
     if (!src.startsWith('/api/proxy/stream')) {
       setResolvedUrl(src);
+      setResolveError(false);
+      setResolving(false);
       return;
     }
 
     let cancelled = false;
     setResolving(true);
+    setResolveError(false);
+    setResolvedUrl('');
+
+    console.log('[DEBUG VideoPlayer] Resolving stream URL dari:', src);
 
     (async () => {
       try {
         const res = await fetch(src);
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled && data.url) {
+        const data = await res.json();
+        console.log('[DEBUG VideoPlayer] Stream response status:', res.status);
+        console.log('[DEBUG VideoPlayer] Stream response data:', data);
+        if (res.ok && data.url) {
+          console.log('[DEBUG VideoPlayer] Resolved URL:', data.url);
+          if (!cancelled) {
             setResolvedUrl(data.url);
           }
+        } else if (!cancelled) {
+          console.error('[DEBUG VideoPlayer] Gagal resolve URL. Response:', data);
+          setResolveError(true);
         }
       } catch (err) {
-        console.error('Failed to resolve stream URL:', err);
+        console.error('[DEBUG VideoPlayer] Fetch stream gagal:', err);
+        if (!cancelled) setResolveError(true);
       }
       if (!cancelled) setResolving(false);
     })();
@@ -129,6 +145,7 @@ export default function VideoPlayer({
     }
 
     const isHls = resolvedUrl.includes('.m3u8') || resolvedUrl.includes('application/x-mpegURL');
+    console.log('[DEBUG VideoPlayer] Inisialisasi video:', { resolvedUrl, isHls, hlsSupported: Hls.isSupported() });
 
     if (isHls && Hls.isSupported()) {
       const hls = new Hls({
@@ -152,6 +169,7 @@ export default function VideoPlayer({
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        console.error('[DEBUG VideoPlayer] HLS Error:', { fatal: data.fatal, type: data.type, details: data.details });
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
@@ -183,7 +201,7 @@ export default function VideoPlayer({
         hlsRef.current = null;
       }
     };
-  }, [resolvedUrl, autoPlay, videoRef]);
+  }, [resolvedUrl, autoPlay]);
 
   // ─── HLS Quality Change ──────────────────────────────────
 
@@ -283,37 +301,13 @@ export default function VideoPlayer({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [actions, state.volume, showControlsTemporarily]);
 
-  // ─── Loading / No Source State ─────────────────────────────
+  // ─── State flags ────────────────────────────────────────────
 
-  const isLoading = externalLoading || resolving || (!resolvedUrl && !!src);
+  const isLoading = externalLoading || resolving || (!resolvedUrl && !!src && !resolveError);
+  const hasError = (state.error || resolveError) && !isLoading;
+  const showVideo = !isLoading && !hasError && !!resolvedUrl;
 
-  if (isLoading || !src) {
-    return (
-      <div className={`relative w-full aspect-video bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center ${className}`}>
-        {poster && <img src={poster} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20" />}
-        <div className="text-center z-10">
-          <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-gray-400 text-sm">Memuat video...</p>
-        </div>
-      </div>
-    );
-  }
-
-  // ─── Error State ───────────────────────────────────────────
-
-  if (state.error) {
-    return (
-      <div className={`relative w-full aspect-video bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center ${className}`}>
-        <div className="text-center">
-          <div className="text-4xl mb-3">⚠️</div>
-          <p className="text-gray-400 text-sm">Video tidak dapat dimuat</p>
-          <p className="text-gray-500 text-xs mt-1">Coba refresh halaman atau pilih kualitas lain</p>
-        </div>
-      </div>
-    );
-  }
-
-  // ─── Render ────────────────────────────────────────────────
+  // ─── Render (video element selalu di-render agar ref stabil) ──
 
   return (
     <div
@@ -326,16 +320,15 @@ export default function VideoPlayer({
       onTouchStart={showControlsTemporarily}
       tabIndex={0}
     >
-      {/* Native video element */}
+      {/* Video element — selalu render agar ref & event listener stabil */}
       <video
-        ref={videoRef}
+        ref={setVideoRef}
         poster={poster}
-        className="w-full h-full object-contain"
+        className={`w-full h-full object-contain ${showVideo ? '' : 'invisible'}`}
         playsInline
         preload="metadata"
         crossOrigin="anonymous"
       >
-        {/* Subtitle tracks */}
         {subtitles.map((sub) => (
           <track
             key={sub.code || sub.language}
@@ -347,40 +340,66 @@ export default function VideoPlayer({
         ))}
       </video>
 
+      {/* Loading overlay */}
+      {(isLoading || !src) && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-neutral-900">
+          {poster && <img src={poster} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20" />}
+          <div className="text-center z-10">
+            <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-gray-400 text-sm">Memuat video...</p>
+          </div>
+        </div>
+      )}
+
+      {/* Error overlay */}
+      {hasError && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-neutral-900">
+          <div className="text-center">
+            <div className="text-4xl mb-3">⚠️</div>
+            <p className="text-gray-400 text-sm">Video tidak dapat dimuat</p>
+            <p className="text-gray-500 text-xs mt-1">Coba refresh halaman atau pilih kualitas lain</p>
+          </div>
+        </div>
+      )}
+
       {/* Overlay (center play button + double-tap zones) */}
-      <PlayerOverlay
-        playing={state.playing}
-        loading={state.loading}
-        onTogglePlay={actions.togglePlay}
-        onSkip={actions.skip}
-        showControls={showControls}
-      />
+      {showVideo && (
+        <PlayerOverlay
+          playing={state.playing}
+          loading={state.loading}
+          onTogglePlay={actions.togglePlay}
+          onSkip={actions.skip}
+          showControls={showControls}
+        />
+      )}
 
       {/* Bottom control bar (glassmorphism) */}
-      <PlayerControls
-        state={state}
-        onTogglePlay={actions.togglePlay}
-        onSkip={actions.skip}
-        onSeek={actions.seek}
-        onVolumeChange={actions.setVolume}
-        onToggleMute={actions.toggleMute}
-        onSpeedChange={actions.setPlaybackSpeed}
-        onToggleFullscreen={actions.toggleFullscreen}
-        onTogglePiP={actions.togglePiP}
-        qualities={qualities}
-        currentQuality={currentQuality}
-        onQualityChange={onQualityChange || (() => {})}
-        hlsQualities={hlsQualities}
-        currentHlsQuality={currentHlsQuality}
-        onHlsQualityChange={handleHlsQualityChange}
-        subtitles={subtitles}
-        activeSubtitle={activeSubtitle}
-        onSubtitleChange={handleSubtitleChange}
-        visible={showControls || !state.playing}
-      />
+      {showVideo && (
+        <PlayerControls
+          state={state}
+          onTogglePlay={actions.togglePlay}
+          onSkip={actions.skip}
+          onSeek={actions.seek}
+          onVolumeChange={actions.setVolume}
+          onToggleMute={actions.toggleMute}
+          onSpeedChange={actions.setPlaybackSpeed}
+          onToggleFullscreen={actions.toggleFullscreen}
+          onTogglePiP={actions.togglePiP}
+          qualities={qualities}
+          currentQuality={currentQuality}
+          onQualityChange={onQualityChange || (() => {})}
+          hlsQualities={hlsQualities}
+          currentHlsQuality={currentHlsQuality}
+          onHlsQualityChange={handleHlsQualityChange}
+          subtitles={subtitles}
+          activeSubtitle={activeSubtitle}
+          onSubtitleChange={handleSubtitleChange}
+          visible={showControls || !state.playing}
+        />
+      )}
 
-      {/* Title overlay (top-left, shown with controls) */}
-      {title && (
+      {/* Title overlay */}
+      {showVideo && title && (
         <div className={`absolute top-0 left-0 right-0 z-20 p-3 sm:p-4 transition-opacity duration-300 ${
           showControls ? 'opacity-100' : 'opacity-0'
         }`}>
