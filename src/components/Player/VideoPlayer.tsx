@@ -230,24 +230,6 @@ export default function VideoPlayer({
         });
       }
 
-      // ─── Double-tap seek layers ────────────────────────
-      const doubleTapCSS = `
-        display:flex;align-items:center;justify-content:center;
-        width:50%;height:100%;position:absolute;top:0;
-        cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;
-      `;
-      const rippleCSS = `
-        position:absolute;width:80px;height:80px;border-radius:50%;
-        background:rgba(255,255,255,0.2);transform:scale(0);
-        animation:artTapRipple 0.5s ease-out;pointer-events:none;
-      `;
-      const rippleKeyframes = `
-        @keyframes artTapRipple {
-          0% { transform:scale(0); opacity:1; }
-          100% { transform:scale(2.5); opacity:0; }
-        }
-      `;
-
       // ─── Create ArtPlayer ──────────────────────────────
       const art = new Artplayer({
         container: containerRef.current!,
@@ -294,26 +276,6 @@ export default function VideoPlayer({
 
         settings,
 
-        // Double-tap seek zones as layers
-        layers: [
-          {
-            name: 'doubleTapLeft',
-            html: `<style>${rippleKeyframes}</style><div style="${doubleTapCSS}left:0;"></div>`,
-            disable: false,
-            click: function () {
-              // Single tap on left side does nothing visible
-            },
-          },
-          {
-            name: 'doubleTapRight',
-            html: `<div style="${doubleTapCSS}right:0;"></div>`,
-            disable: false,
-            click: function () {
-              // Single tap on right side does nothing visible
-            },
-          },
-        ],
-
         customType: {
           m3u8: function (video: HTMLVideoElement, url: string) {
             if (Hls.isSupported()) {
@@ -335,51 +297,6 @@ export default function VideoPlayer({
       });
 
       artRef.current = art;
-
-      // ─── Double-tap seek logic ─────────────────────────
-      let lastTapTime = 0;
-      let lastTapSide: 'left' | 'right' | null = null;
-
-      const handleDoubleTap = (e: MouseEvent | TouchEvent) => {
-        const rect = art.template.$player.getBoundingClientRect();
-        const clientX = 'touches' in e
-          ? (e as TouchEvent).changedTouches[0]?.clientX
-          : (e as MouseEvent).clientX;
-        const relX = (clientX - rect.left) / rect.width;
-        const now = Date.now();
-        const side = relX < 0.4 ? 'left' : relX > 0.6 ? 'right' : null;
-
-        if (side && lastTapSide === side && now - lastTapTime < 350) {
-          // Double tap detected
-          const seekAmount = side === 'left' ? -10 : 10;
-          art.currentTime = Math.max(0, Math.min(art.currentTime + seekAmount, art.duration));
-
-          // Show ripple feedback
-          const indicator = document.createElement('div');
-          indicator.innerHTML = `
-            <div style="${rippleCSS}"></div>
-            <span style="color:white;font-size:14px;font-weight:bold;z-index:1;text-shadow:0 1px 3px rgba(0,0,0,0.5);">
-              ${side === 'left' ? '⏪' : '⏩'} ${Math.abs(seekAmount)}s
-            </span>
-          `;
-          indicator.style.cssText = `
-            position:absolute;top:50%;${side}:15%;transform:translateY(-50%);
-            display:flex;flex-direction:column;align-items:center;gap:4px;
-            pointer-events:none;z-index:50;
-          `;
-          art.template.$player.appendChild(indicator);
-          setTimeout(() => indicator.remove(), 600);
-
-          lastTapTime = 0;
-          lastTapSide = null;
-        } else {
-          lastTapTime = now;
-          lastTapSide = side;
-        }
-      };
-
-      art.template.$video.addEventListener('click', handleDoubleTap);
-      art.template.$video.addEventListener('touchend', handleDoubleTap);
 
       // ─── Fullscreen → landscape ────────────────────────
       art.on('fullscreen', (state: boolean) => {
