@@ -1,14 +1,5 @@
 'use client';
 
-/**
- * VideoPlayer - ArtPlayer wrapper for Next.js
- *
- * Fixes applied:
- * - Quality switch via custom settings (not built-in quality option)
- * - Subtitle: strip <font> tags, escape:false, onVttLoad cleanup
- * - Default: Indonesian subtitle ON, transparent background
- */
-
 import { useEffect, useRef, useState } from 'react';
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
@@ -39,22 +30,20 @@ export interface VideoPlayerProps {
   className?: string;
 }
 
-// ─── Subtitle style presets ──────────────────────────────────
+// ─── Presets ─────────────────────────────────────────────────
 
-const SUBTITLE_SIZES = [
+const SUB_SIZES = [
   { html: 'Kecil', value: '16px' },
   { html: 'Sedang', value: '22px' },
   { html: 'Besar', value: '28px' },
   { html: 'Sangat Besar', value: '36px' },
 ];
-
-const SUBTITLE_BACKGROUNDS = [
+const SUB_BGS = [
   { html: 'Tanpa Background', value: 'transparent' },
   { html: 'Semi-transparan', value: 'rgba(0,0,0,0.6)' },
   { html: 'Hitam Solid', value: 'rgba(0,0,0,0.9)' },
 ];
-
-const SUBTITLE_COLORS = [
+const SUB_COLORS = [
   { html: 'Putih', value: '#FFFFFF' },
   { html: 'Kuning', value: '#FFFF00' },
 ];
@@ -70,78 +59,63 @@ async function fetchFreshUrl(proxySrc: string): Promise<string> {
   return '';
 }
 
-function buildProxyUrl(baseSrc: string, resolution?: number): string {
-  if (!baseSrc.startsWith('/api/proxy/stream')) return baseSrc;
+function buildProxyUrl(baseSrc: string, resolution: number): string {
   try {
     const url = new URL(baseSrc, window.location.origin);
-    if (resolution) url.searchParams.set('resolution', String(resolution));
+    url.searchParams.set('resolution', String(resolution));
     return url.pathname + url.search;
   } catch {
     return baseSrc;
   }
 }
 
-/** Strip HTML <font> tags from subtitle text but keep content */
 function stripFontTags(vtt: string): string {
   return vtt.replace(/<\/?font[^>]*>/gi, '');
 }
 
-/** Find Indonesian subtitle from list, fallback to first */
-function findDefaultSubtitle(subs: SubtitleOption[]): SubtitleOption | null {
-  if (subs.length === 0) return null;
-  // Try Indonesian variants
-  const indo = subs.find(s =>
+function findIndoSubtitle(subs: SubtitleOption[]): SubtitleOption | null {
+  if (!subs.length) return null;
+  return subs.find(s =>
     s.code === 'in_id' || s.code === 'id' || s.code === 'in' ||
     s.language?.toLowerCase().includes('indonesian') ||
     s.language?.toLowerCase().includes('indonesia')
-  );
-  return indo || subs[0];
+  ) || subs[0];
 }
 
 // ─── Component ───────────────────────────────────────────────
 
 export default function VideoPlayer({
-  src,
-  poster,
-  title,
+  src, poster, title,
   loading: externalLoading = false,
-  qualities = [],
-  subtitles = [],
-  contentId,
-  onTimeUpdate,
-  className = '',
+  qualities = [], subtitles = [],
+  contentId, onTimeUpdate, className = '',
 }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const artRef = useRef<Artplayer | null>(null);
-  const lastProgressSave = useRef(0);
-  const srcRef = useRef(src); // track src for quality switch proxy URL
+  const lastSave = useRef(0);
+  const srcRef = useRef(src);
 
-  // Subtitle style state - DEFAULT: transparent background
-  const [subFontSize, setSubFontSize] = useState('22px');
-  const [subBackground, setSubBackground] = useState('transparent');
+  // Subtitle style (persisted)
+  const [subSize, setSubSize] = useState('22px');
+  const [subBg, setSubBg] = useState('transparent');
   const [subColor, setSubColor] = useState('#FFFFFF');
 
-  // Load saved subtitle settings
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('sf-sub-style');
-      if (saved) {
-        const s = JSON.parse(saved);
-        if (s.fontSize) setSubFontSize(s.fontSize);
-        if (s.background !== undefined) setSubBackground(s.background);
-        if (s.color) setSubColor(s.color);
-      }
+      const s = JSON.parse(localStorage.getItem('sf-sub-style') || '{}');
+      if (s.fontSize) setSubSize(s.fontSize);
+      if (s.background !== undefined) setSubBg(s.background);
+      if (s.color) setSubColor(s.color);
     } catch {}
   }, []);
 
-  const saveSubStyle = (fontSize: string, background: string, color: string) => {
-    try { localStorage.setItem('sf-sub-style', JSON.stringify({ fontSize, background, color })); } catch {}
+  const saveSub = (sz: string, bg: string, cl: string) => {
+    try { localStorage.setItem('sf-sub-style', JSON.stringify({ fontSize: sz, background: bg, color: cl })); } catch {}
   };
 
-  // Keep srcRef in sync
   useEffect(() => { srcRef.current = src; }, [src]);
 
-  // ─── Initialize ArtPlayer ──────────────────────────────────
+  // ─── Init ArtPlayer ────────────────────────────────────────
 
   useEffect(() => {
     if (!containerRef.current || !src || externalLoading) return;
@@ -151,56 +125,61 @@ export default function VideoPlayer({
       artRef.current = null;
     }
 
-    let destroyed = false;
+    let dead = false;
 
     (async () => {
       const videoUrl = await fetchFreshUrl(src);
-      if (destroyed || !videoUrl || !containerRef.current) return;
+      if (dead || !videoUrl || !containerRef.current) return;
 
-      // ─── Find default subtitle (prefer Indonesian) ─────
-      const defaultSub = findDefaultSubtitle(subtitles);
+      const defaultSub = findIndoSubtitle(subtitles);
 
-      // ─── Build settings array ──────────────────────────
-      const settingsArray: any[] = [];
+      // ─── Settings array ────────────────────────────────
+      const settings: any[] = [];
 
-      // Quality selector (custom, NOT built-in quality option)
+      // Quality
       if (qualities.length > 1) {
-        const highestRes = qualities[qualities.length - 1]?.resolution;
-        settingsArray.push({
+        const best = qualities[qualities.length - 1];
+        settings.push({
           html: 'Kualitas',
-          tooltip: highestRes ? `${highestRes}p` : 'Auto',
-          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
+          tooltip: `${best.resolution}p`,
+          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
           selector: qualities.map((q, i) => ({
             html: `${q.resolution}p${q.resolution >= 1080 ? ' HD' : ''}`,
-            _resolution: q.resolution,
+            _res: q.resolution,
             default: i === qualities.length - 1,
           })),
           onSelect(item: any) {
-            // Fetch fresh URL for selected resolution
-            const proxyUrl = buildProxyUrl(srcRef.current, item._resolution);
-            fetchFreshUrl(proxyUrl).then(freshUrl => {
-              if (freshUrl && artRef.current) {
-                artRef.current.switchQuality(freshUrl);
-              }
+            const art = artRef.current;
+            if (!art) return item.html;
+            const currentTime = art.currentTime;
+            const wasPlaying = art.playing;
+            const proxy = buildProxyUrl(srcRef.current, item._res);
+            fetchFreshUrl(proxy).then(url => {
+              if (!url || !artRef.current) return;
+              // Directly set URL and restore position
+              artRef.current.once('video:canplay', () => {
+                artRef.current!.currentTime = currentTime;
+                if (wasPlaying) artRef.current!.play();
+              });
+              artRef.current.url = url;
             });
             return item.html;
           },
         });
       }
 
-      // Subtitle language selector
+      // Subtitle language
       if (subtitles.length > 0) {
-        const defaultSubCode = defaultSub?.code || defaultSub?.language || '';
-        settingsArray.push({
+        settings.push({
           html: 'Subtitle',
-          tooltip: defaultSub ? defaultSub.language : 'Off',
+          tooltip: defaultSub?.language || 'Off',
           icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 8h4M7 12h2m4 0h2m-4 4h4"/></svg>',
           selector: [
             { html: 'Off', default: !defaultSub },
             ...subtitles.map(sub => ({
               html: sub.language,
               url: sub.url,
-              default: (sub.code === defaultSubCode || sub.language === defaultSub?.language),
+              default: sub === defaultSub,
             })),
           ],
           onSelect(item: any) {
@@ -214,51 +193,60 @@ export default function VideoPlayer({
           },
         });
 
-        // Font size setting
-        settingsArray.push({
+        // Font size
+        settings.push({
           html: 'Ukuran Subtitle',
-          tooltip: SUBTITLE_SIZES.find(s => s.value === subFontSize)?.html || 'Sedang',
-          selector: SUBTITLE_SIZES.map(s => ({
-            html: s.html, _value: s.value, default: s.value === subFontSize,
-          })),
+          tooltip: SUB_SIZES.find(s => s.value === subSize)?.html || 'Sedang',
+          selector: SUB_SIZES.map(s => ({ html: s.html, _v: s.value, default: s.value === subSize })),
           onSelect(item: any) {
-            setSubFontSize(item._value);
-            saveSubStyle(item._value, subBackground, subColor);
-            artRef.current?.subtitle.style({ fontSize: item._value });
+            setSubSize(item._v); saveSub(item._v, subBg, subColor);
+            artRef.current?.subtitle.style({ fontSize: item._v });
             return item.html;
           },
         });
 
-        // Background setting
-        settingsArray.push({
+        // Background
+        settings.push({
           html: 'Background Subtitle',
-          tooltip: SUBTITLE_BACKGROUNDS.find(s => s.value === subBackground)?.html || 'Tanpa Background',
-          selector: SUBTITLE_BACKGROUNDS.map(s => ({
-            html: s.html, _value: s.value, default: s.value === subBackground,
-          })),
+          tooltip: SUB_BGS.find(s => s.value === subBg)?.html || 'Tanpa Background',
+          selector: SUB_BGS.map(s => ({ html: s.html, _v: s.value, default: s.value === subBg })),
           onSelect(item: any) {
-            setSubBackground(item._value);
-            saveSubStyle(subFontSize, item._value, subColor);
-            artRef.current?.subtitle.style({ backgroundColor: item._value });
+            setSubBg(item._v); saveSub(subSize, item._v, subColor);
+            artRef.current?.subtitle.style({ backgroundColor: item._v });
             return item.html;
           },
         });
 
-        // Color setting
-        settingsArray.push({
+        // Color
+        settings.push({
           html: 'Warna Subtitle',
-          tooltip: SUBTITLE_COLORS.find(s => s.value === subColor)?.html || 'Putih',
-          selector: SUBTITLE_COLORS.map(s => ({
-            html: s.html, _value: s.value, default: s.value === subColor,
-          })),
+          tooltip: SUB_COLORS.find(s => s.value === subColor)?.html || 'Putih',
+          selector: SUB_COLORS.map(s => ({ html: s.html, _v: s.value, default: s.value === subColor })),
           onSelect(item: any) {
-            setSubColor(item._value);
-            saveSubStyle(subFontSize, subBackground, item._value);
-            artRef.current?.subtitle.style({ color: item._value });
+            setSubColor(item._v); saveSub(subSize, subBg, item._v);
+            artRef.current?.subtitle.style({ color: item._v });
             return item.html;
           },
         });
       }
+
+      // ─── Double-tap seek layers ────────────────────────
+      const doubleTapCSS = `
+        display:flex;align-items:center;justify-content:center;
+        width:50%;height:100%;position:absolute;top:0;
+        cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;
+      `;
+      const rippleCSS = `
+        position:absolute;width:80px;height:80px;border-radius:50%;
+        background:rgba(255,255,255,0.2);transform:scale(0);
+        animation:artTapRipple 0.5s ease-out;pointer-events:none;
+      `;
+      const rippleKeyframes = `
+        @keyframes artTapRipple {
+          0% { transform:scale(0); opacity:1; }
+          100% { transform:scale(2.5); opacity:0; }
+        }
+      `;
 
       // ─── Create ArtPlayer ──────────────────────────────
       const art = new Artplayer({
@@ -269,7 +257,6 @@ export default function VideoPlayer({
         volume: 0.8,
         lang: 'en',
 
-        // Built-in features
         hotkey: true,
         pip: true,
         fullscreen: true,
@@ -277,7 +264,6 @@ export default function VideoPlayer({
         setting: true,
         playbackRate: true,
         aspectRatio: true,
-        flip: true,
         lock: true,
         gesture: true,
         fastForward: true,
@@ -287,20 +273,15 @@ export default function VideoPlayer({
         mutex: true,
         backdrop: true,
 
-        // Unique ID for autoPlayback
         id: contentId || src,
 
-        // NO built-in quality (we use custom settings instead)
-        // quality: [],
-
-        // Subtitle: default to Indonesian, strip <font> tags
         subtitle: defaultSub ? {
           url: defaultSub.url,
           type: 'srt',
           style: {
             color: subColor,
-            fontSize: subFontSize,
-            backgroundColor: subBackground,
+            fontSize: subSize,
+            backgroundColor: subBg,
             padding: '4px 8px',
             borderRadius: '4px',
             textShadow: '0 2px 4px rgba(0,0,0,0.8)',
@@ -308,15 +289,31 @@ export default function VideoPlayer({
           },
           encoding: 'utf-8',
           escape: false,
-          onVttLoad(vtt: string) {
-            return stripFontTags(vtt);
-          },
+          onVttLoad(vtt: string) { return stripFontTags(vtt); },
         } : {},
 
-        // Custom settings (quality + subtitle style)
-        settings: settingsArray,
+        settings,
 
-        // HLS support
+        // Double-tap seek zones as layers
+        layers: [
+          {
+            name: 'doubleTapLeft',
+            html: `<style>${rippleKeyframes}</style><div style="${doubleTapCSS}left:0;"></div>`,
+            disable: false,
+            click: function () {
+              // Single tap on left side does nothing visible
+            },
+          },
+          {
+            name: 'doubleTapRight',
+            html: `<div style="${doubleTapCSS}right:0;"></div>`,
+            disable: false,
+            click: function () {
+              // Single tap on right side does nothing visible
+            },
+          },
+        ],
+
         customType: {
           m3u8: function (video: HTMLVideoElement, url: string) {
             if (Hls.isSupported()) {
@@ -339,12 +336,78 @@ export default function VideoPlayer({
 
       artRef.current = art;
 
-      // Server-side progress saving
+      // ─── Double-tap seek logic ─────────────────────────
+      let lastTapTime = 0;
+      let lastTapSide: 'left' | 'right' | null = null;
+
+      const handleDoubleTap = (e: MouseEvent | TouchEvent) => {
+        const rect = art.template.$player.getBoundingClientRect();
+        const clientX = 'touches' in e
+          ? (e as TouchEvent).changedTouches[0]?.clientX
+          : (e as MouseEvent).clientX;
+        const relX = (clientX - rect.left) / rect.width;
+        const now = Date.now();
+        const side = relX < 0.4 ? 'left' : relX > 0.6 ? 'right' : null;
+
+        if (side && lastTapSide === side && now - lastTapTime < 350) {
+          // Double tap detected
+          const seekAmount = side === 'left' ? -10 : 10;
+          art.currentTime = Math.max(0, Math.min(art.currentTime + seekAmount, art.duration));
+
+          // Show ripple feedback
+          const indicator = document.createElement('div');
+          indicator.innerHTML = `
+            <div style="${rippleCSS}"></div>
+            <span style="color:white;font-size:14px;font-weight:bold;z-index:1;text-shadow:0 1px 3px rgba(0,0,0,0.5);">
+              ${side === 'left' ? '⏪' : '⏩'} ${Math.abs(seekAmount)}s
+            </span>
+          `;
+          indicator.style.cssText = `
+            position:absolute;top:50%;${side}:15%;transform:translateY(-50%);
+            display:flex;flex-direction:column;align-items:center;gap:4px;
+            pointer-events:none;z-index:50;
+          `;
+          art.template.$player.appendChild(indicator);
+          setTimeout(() => indicator.remove(), 600);
+
+          lastTapTime = 0;
+          lastTapSide = null;
+        } else {
+          lastTapTime = now;
+          lastTapSide = side;
+        }
+      };
+
+      art.template.$video.addEventListener('click', handleDoubleTap);
+      art.template.$video.addEventListener('touchend', handleDoubleTap);
+
+      // ─── Fullscreen → landscape ────────────────────────
+      art.on('fullscreen', (state: boolean) => {
+        try {
+          if (state) {
+            (screen.orientation as any)?.lock?.('landscape').catch(() => {});
+          } else {
+            (screen.orientation as any)?.unlock?.();
+          }
+        } catch {}
+      });
+
+      art.on('fullscreenWeb', (state: boolean) => {
+        try {
+          if (state) {
+            (screen.orientation as any)?.lock?.('landscape').catch(() => {});
+          } else {
+            (screen.orientation as any)?.unlock?.();
+          }
+        } catch {}
+      });
+
+      // ─── Progress saving ───────────────────────────────
       if (onTimeUpdate) {
         art.on('video:timeupdate', () => {
           const now = Math.floor(art.currentTime);
-          if (now > 0 && now % 10 === 0 && now !== lastProgressSave.current) {
-            lastProgressSave.current = now;
+          if (now > 0 && now % 10 === 0 && now !== lastSave.current) {
+            lastSave.current = now;
             onTimeUpdate(art.currentTime, art.duration);
           }
         });
@@ -352,7 +415,7 @@ export default function VideoPlayer({
     })();
 
     return () => {
-      destroyed = true;
+      dead = true;
       if (artRef.current) {
         if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
         artRef.current.destroy(false);
@@ -361,7 +424,7 @@ export default function VideoPlayer({
     };
   }, [src, externalLoading]);
 
-  // ─── Loading state ─────────────────────────────────────────
+  // ─── Loading ───────────────────────────────────────────────
 
   if (externalLoading || !src) {
     return (
@@ -375,7 +438,5 @@ export default function VideoPlayer({
     );
   }
 
-  return (
-    <div ref={containerRef} className={`w-full aspect-video rounded-xl overflow-hidden ${className}`} />
-  );
+  return <div ref={containerRef} className={`w-full aspect-video rounded-xl overflow-hidden ${className}`} />;
 }

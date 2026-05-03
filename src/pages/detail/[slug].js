@@ -238,7 +238,7 @@ export default function DetailPage() {
     number: i + 1,
     title: `Episode ${i + 1}`,
     duration: item.duration || '',
-    thumbnail: item.backdrop || item.poster,
+    thumbnail: item.poster || item.backdrop,
     description: `${item.title} - Season ${currentSeason}, Episode ${i + 1}`,
   }));
 
