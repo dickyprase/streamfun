@@ -70,10 +70,15 @@ const SUBTITLE_COLORS = [
 
 async function fetchFreshUrl(proxySrc: string): Promise<string> {
   try {
+    console.log(`[PLAYER fetchFreshUrl] Fetching: ${proxySrc}`);
     const res = await fetch(proxySrc);
     const data = await res.json();
+    console.log(`[PLAYER fetchFreshUrl] Status: ${res.status}, hasUrl: ${!!data.url}, error: ${data.error || 'none'}`);
     if (res.ok && data.url) return data.url;
-  } catch {}
+    console.error(`[PLAYER fetchFreshUrl] Failed:`, data);
+  } catch (err) {
+    console.error(`[PLAYER fetchFreshUrl] Exception:`, err);
+  }
   return '';
 }
 
@@ -142,10 +147,17 @@ export default function VideoPlayer({
 
     let destroyed = false;
 
+    console.log(`[PLAYER] Init: src=${src}, qualities=${qualities.length}, subtitles=${subtitles.length}`);
+
     (async () => {
       // Fetch fresh video URL from proxy
+      console.log(`[PLAYER] Fetching fresh URL from: ${src}`);
       const videoUrl = await fetchFreshUrl(src);
-      if (destroyed || !videoUrl || !containerRef.current) return;
+      console.log(`[PLAYER] Resolved URL: ${videoUrl ? videoUrl.substring(0, 80) + '...' : 'EMPTY/NULL'}`);
+      if (destroyed || !videoUrl || !containerRef.current) {
+        console.log(`[PLAYER] Aborted: destroyed=${destroyed}, hasUrl=${!!videoUrl}, hasContainer=${!!containerRef.current}`);
+        return;
+      }
 
       // Build quality list with fresh URLs fetched on-demand
       const qualityList = qualities.map((q, i) => ({
@@ -316,6 +328,15 @@ export default function VideoPlayer({
       });
 
       artRef.current = art;
+
+      // ─── Debug: log all video events ─────────────────
+      art.on('ready', () => console.log('[PLAYER] ArtPlayer ready'));
+      art.on('video:error', (err: any) => console.error('[PLAYER] Video error event:', err));
+      art.on('error', (err: any) => console.error('[PLAYER] ArtPlayer error:', err));
+      art.on('video:loadeddata', () => console.log('[PLAYER] Video loadeddata'));
+      art.on('video:canplay', () => console.log('[PLAYER] Video canplay'));
+      art.on('video:playing', () => console.log('[PLAYER] Video playing'));
+      art.on('video:waiting', () => console.log('[PLAYER] Video waiting/buffering'));
 
       // ─── Quality switch handler (fetch fresh URL) ────
       art.on('video:quality', async (quality: any) => {
