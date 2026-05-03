@@ -153,7 +153,12 @@ export function useVideoPlayer({ src, autoPlay = false }: UseVideoPlayerProps) {
       waiting: () => setState(s => ({ ...s, loading: true })),
       canplay: () => setState(s => ({ ...s, loading: false })),
       playing: () => setState(s => ({ ...s, loading: false, playing: true })),
-      error: () => setState(s => ({ ...s, error: true, loading: false })),
+      error: () => {
+        // Only set error if video has a src (avoid false errors during source switch)
+        if (video.src && video.networkState === video.NETWORK_NO_SOURCE) {
+          setState(s => ({ ...s, error: true, loading: false }));
+        }
+      },
       volumechange: () => setState(s => ({ ...s, volume: video.volume, muted: video.muted })),
       progress: () => {
         if (video.buffered.length > 0) {
