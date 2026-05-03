@@ -3,11 +3,21 @@ import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import VideoPlayer from '@/components/Player/VideoPlayer';
+import dynamic from 'next/dynamic';
 import EpisodeList from '@/components/Player/EpisodeList';
 import ContentGrid from '@/components/Content/ContentGrid';
 import { useAuth } from '@/context/AuthContext';
 import useLocalStorage from '@/hooks/useLocalStorage';
+
+// Dynamic import VideoPlayer (uses browser APIs)
+const VideoPlayer = dynamic(() => import('@/components/Player/VideoPlayer'), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full aspect-video bg-dark-300 rounded-xl animate-pulse flex items-center justify-center">
+      <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  ),
+});
 
 export default function DetailPage() {
   const router = useRouter();
@@ -17,21 +27,23 @@ export default function DetailPage() {
   const [playData, setPlayData] = useState(null);
   const [currentSeason, setCurrentSeason] = useState(0);
   const [currentEpisode, setCurrentEpisode] = useState(1);
-  const [currentQuality, setCurrentQuality] = useState(null);
   const [related, setRelated] = useState([]);
   const [library, setLibrary] = useLocalStorage('streamfront-library', []);
   const [loading, setLoading] = useState(true);
   const [playLoading, setPlayLoading] = useState(false);
   const [contentId, setContentId] = useState(null);
-
-  // Resume playback state
-  const [resumeTime, setResumeTime] = useState(0);
-  const [showResumeBanner, setShowResumeBanner] = useState(false);
-  const [initialSeekDone, setInitialSeekDone] = useState(false);
+  const initialFetchDone = useRef(false);
 
   // Extract content ID from slug
   useEffect(() => {
     if (!slug) return;
+    // Reset state for new content
+    setItem(null);
+    setPlayData(null);
+    setContentId(null);
+    setLoading(true);
+    initialFetchDone.current = false;
+
     const match = slug.match(/(\d{6,})$/);
     if (match) {
       setContentId(match[1]);
@@ -59,7 +71,7 @@ export default function DetailPage() {
     if (!contentId) return;
     setLoading(true);
     setPlayData(null);
-    setInitialSeekDone(false);
+    initialFetchDone.current = false;
 
     (async () => {
       try {
@@ -69,7 +81,6 @@ export default function DetailPage() {
           const data = json.data;
           setItem(data);
 
-          // Determine initial season (0 for movies, first season for series)
           const seasons = data?.seasons || [];
           const isSeries = data?.type === 'series' || data?.type === 'anime' || (data?.episodes > 1);
           if (isSeries && seasons.length > 0) {
@@ -92,25 +103,6 @@ export default function DetailPage() {
                 content_poster: data?.poster,
               }),
             }).catch(() => {});
-
-            // Fetch resume progress
-            try {
-              const progRes = await fetch(`/api/user/progress/${contentId}`);
-              if (progRes.ok) {
-                const progData = await progRes.json();
-                if (progData.progress_seconds > 30 && progData.duration_seconds > 0) {
-                  // Only show resume if not near the end (>95%)
-                  const pct = progData.progress_seconds / progData.duration_seconds;
-                  if (pct < 0.95) {
-                    setResumeTime(progData.progress_seconds);
-                    setShowResumeBanner(true);
-                    // If series, also restore season/episode
-                    if (progData.season > 0) setCurrentSeason(progData.season);
-                    if (progData.episode > 0) setCurrentEpisode(progData.episode);
-                  }
-                }
-              }
-            } catch {}
           }
         }
       } catch (err) {
@@ -125,10 +117,9 @@ export default function DetailPage() {
         const res = await fetch(`/api/proxy/recommendations?type=similar&id=${contentId}`);
         if (res.ok) {
           const json = await res.json();
-          const items = json.items || [];
           const unique = [];
           const seen = new Set();
-          for (const item of items) {
+          for (const item of (json.items || [])) {
             if (!seen.has(item.id)) { seen.add(item.id); unique.push(item); }
           }
           setRelated(unique);
@@ -137,7 +128,7 @@ export default function DetailPage() {
     })();
   }, [contentId, isAuthenticated]);
 
-  // Fetch play data
+  // Fetch play data (qualities + subtitles)
   const fetchPlay = useCallback(async (season, episode) => {
     if (!contentId) return;
     setPlayLoading(true);
@@ -146,9 +137,6 @@ export default function DetailPage() {
       if (res.ok) {
         const json = await res.json();
         setPlayData(json.data);
-        if (json.data?.qualities?.length > 0) {
-          setCurrentQuality(json.data.qualities[json.data.qualities.length - 1]);
-        }
       }
     } catch (err) {
       console.error('Failed to fetch play:', err);
@@ -157,19 +145,12 @@ export default function DetailPage() {
   }, [contentId]);
 
   // Build stream proxy URL
-  const getStreamUrl = useCallback((resolution) => {
+  const getStreamUrl = useCallback(() => {
     if (!contentId) return '';
-    const params = new URLSearchParams({
-      id: contentId,
-      season: String(currentSeason),
-      episode: String(currentEpisode),
-    });
-    if (resolution) params.set('resolution', String(resolution));
-    return `/api/proxy/stream?${params.toString()}`;
+    return `/api/proxy/stream?id=${contentId}&season=${currentSeason}&episode=${currentEpisode}`;
   }, [contentId, currentSeason, currentEpisode]);
 
-  // Auto-fetch play data ONLY on initial load (not on episode switch - that's handled by handlers)
-  const initialFetchDone = useRef(false);
+  // Auto-fetch play data on initial load
   useEffect(() => {
     if (item && contentId && !initialFetchDone.current) {
       initialFetchDone.current = true;
@@ -177,11 +158,9 @@ export default function DetailPage() {
     }
   }, [item, contentId]);
 
-  // Save watch progress periodically (every 10s)
+  // Save watch progress to server (called by ArtPlayer every 10s)
   const handleTimeUpdate = useCallback((currentTime, duration) => {
     if (!isAuthenticated || !contentId || !duration) return;
-    // Debounce: only save every 10 seconds
-    if (Math.floor(currentTime) % 10 !== 0) return;
     fetch('/api/user/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -198,17 +177,6 @@ export default function DetailPage() {
     }).catch(() => {});
   }, [isAuthenticated, contentId, slug, item, currentSeason, currentEpisode]);
 
-  // Handle resume
-  const handleResume = () => {
-    setShowResumeBanner(false);
-    setInitialSeekDone(true);
-  };
-
-  const handleDismissResume = () => {
-    setShowResumeBanner(false);
-    setResumeTime(0);
-  };
-
   const isInLibrary = library.some(l => l.id === contentId);
 
   const toggleLibrary = () => {
@@ -221,10 +189,8 @@ export default function DetailPage() {
 
   const handleEpisodeSelect = (ep) => {
     setCurrentEpisode(ep.number);
-    setResumeTime(0);
-    setShowResumeBanner(false);
-    // Don't null playData - let the new fetch overwrite it
-    // The stream URL will change because currentEpisode changed (via getStreamUrl dep)
+    setPlayData(null);
+    initialFetchDone.current = false;
     fetchPlay(currentSeason, ep.number);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -232,13 +198,9 @@ export default function DetailPage() {
   const handleSeasonChange = (season) => {
     setCurrentSeason(season);
     setCurrentEpisode(1);
-    setResumeTime(0);
-    setShowResumeBanner(false);
+    setPlayData(null);
+    initialFetchDone.current = false;
     fetchPlay(season, 1);
-  };
-
-  const handleQualityChange = (quality) => {
-    setCurrentQuality(quality);
   };
 
   if (loading) {
@@ -282,14 +244,6 @@ export default function DetailPage() {
 
   const isSeries = item.type === 'series' || item.type === 'anime' || item.episodes > 1;
 
-  const formatResumeTime = (s) => {
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = Math.floor(s % 60);
-    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
-    return `${m}:${sec.toString().padStart(2, '0')}`;
-  };
-
   return (
     <>
       <Head>
@@ -298,57 +252,20 @@ export default function DetailPage() {
       </Head>
 
       <div className="container py-6">
-        {/* Resume Banner */}
-        {showResumeBanner && resumeTime > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-4 bg-purple-600/20 border border-purple-500/30 rounded-xl p-4 flex items-center justify-between"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-purple-500/30 flex items-center justify-center">
-                <svg className="w-5 h-5 text-purple-400" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-white text-sm font-medium">Lanjutkan menonton</p>
-                <p className="text-purple-300 text-xs">Terakhir di {formatResumeTime(resumeTime)}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleDismissResume}
-                className="text-gray-400 hover:text-white text-xs px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors"
-              >
-                Dari Awal
-              </button>
-              <button
-                onClick={handleResume}
-                className="bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
-              >
-                Lanjutkan
-              </button>
-            </div>
-          </motion.div>
-        )}
-
-        {/* Video Player */}
+        {/* Video Player (ArtPlayer) */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
         >
           <VideoPlayer
-            src={getStreamUrl(currentQuality?.resolution)}
+            src={getStreamUrl()}
             poster={item.backdrop || item.poster}
             title={isSeries ? `${item.title} - S${currentSeason}E${currentEpisode}` : item.title}
             loading={playLoading}
             qualities={playData?.qualities || []}
-            currentQuality={currentQuality}
-            onQualityChange={handleQualityChange}
             subtitles={playData?.subtitles || []}
-            initialSeekTime={initialSeekDone ? resumeTime : 0}
+            contentId={`${contentId}-s${currentSeason}-e${currentEpisode}`}
             onTimeUpdate={handleTimeUpdate}
           />
         </motion.div>
@@ -364,17 +281,13 @@ export default function DetailPage() {
             <div>
               <h1 className="text-2xl md:text-3xl font-bold text-white mb-3">
                 {item.title}
-                {isSeries && (
-                  <span className="text-primary-400 text-lg ml-2">S{currentSeason} Ep {currentEpisode}</span>
-                )}
+                {isSeries && <span className="text-primary-400 text-lg ml-2">S{currentSeason} Ep {currentEpisode}</span>}
               </h1>
 
               <div className="flex items-center gap-3 flex-wrap mb-4">
                 {item.rating && (
                   <div className="flex items-center gap-1 badge badge-yellow">
-                    <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
-                      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                    </svg>
+                    <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg>
                     {item.rating}
                   </div>
                 )}
@@ -398,9 +311,7 @@ export default function DetailPage() {
                   <span className="text-xs text-gray-500 self-center">Audio:</span>
                   {item.dubs.map(d => (
                     <Link key={d.id} href={`/detail/${slug}?id=${d.id}`}>
-                      <span className={`badge text-xs transition-colors cursor-pointer ${
-                        d.id === contentId ? 'bg-primary-500/30 text-primary-400 ring-1 ring-primary-500/50' : 'bg-white/10 text-gray-300 hover:bg-white/20'
-                      }`}>{d.name}</span>
+                      <span className={`badge text-xs transition-colors cursor-pointer ${d.id === contentId ? 'bg-primary-500/30 text-primary-400 ring-1 ring-primary-500/50' : 'bg-white/10 text-gray-300 hover:bg-white/20'}`}>{d.name}</span>
                     </Link>
                   ))}
                 </div>
@@ -411,18 +322,16 @@ export default function DetailPage() {
                   <span className="text-xs text-gray-500 self-center">Season:</span>
                   {item.seasons.map(s => (
                     <button key={s.season} onClick={() => handleSeasonChange(s.season)}
-                      className={`badge text-xs transition-colors ${
-                        currentSeason === s.season ? 'bg-primary-500/30 text-primary-400 ring-1 ring-primary-500/50' : 'bg-white/10 text-gray-300 hover:bg-white/20'
-                      }`}>Season {s.season}</button>
+                      className={`badge text-xs transition-colors ${currentSeason === s.season ? 'bg-primary-500/30 text-primary-400 ring-1 ring-primary-500/50' : 'bg-white/10 text-gray-300 hover:bg-white/20'}`}>
+                      Season {s.season}
+                    </button>
                   ))}
                 </div>
               )}
 
               <div className="flex items-center gap-3 mb-6">
                 <motion.button whileTap={{ scale: 0.95 }} onClick={toggleLibrary}
-                  className={`flex items-center gap-2 py-2.5 px-5 rounded-lg font-medium text-sm transition-all ${
-                    isInLibrary ? 'bg-primary-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'
-                  }`}>
+                  className={`flex items-center gap-2 py-2.5 px-5 rounded-lg font-medium text-sm transition-all ${isInLibrary ? 'bg-primary-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}>
                   {isInLibrary ? (
                     <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
                   ) : (

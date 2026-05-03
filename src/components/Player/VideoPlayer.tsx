@@ -1,32 +1,96 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import Hls from 'hls.js';
-import { useVideoPlayer, type QualityLevel } from './useVideoPlayer';
-import PlayerControls from './PlayerControls';
-import PlayerOverlay from './PlayerOverlay';
-import SubtitleOverlay, { type SubtitleSettings, DEFAULT_SUBTITLE_SETTINGS } from './SubtitleOverlay';
+/**
+ * VideoPlayer - ArtPlayer wrapper for Next.js
+ *
+ * Features (all handled by ArtPlayer natively):
+ * - Quality switching with time preservation
+ * - Subtitle display with custom styling (font size, bg, color)
+ * - Resume playback (autoPlayback localStorage + server-side)
+ * - Mobile gestures (swipe seek/volume, long-press fast-forward, lock)
+ * - Playback speed control
+ * - Fullscreen + PiP + keyboard shortcuts
+ * - HLS streaming via hls.js
+ */
 
-export interface SubtitleTrack {
+import { useEffect, useRef, useState } from 'react';
+import Artplayer from 'artplayer';
+import Hls from 'hls.js';
+
+// ─── Types ───────────────────────────────────────────────────
+
+export interface QualityOption {
+  resolution: number;
+  label: string;
+  url?: string; // not used directly - we fetch fresh URLs via proxy
+}
+
+export interface SubtitleOption {
   language: string;
   url: string;
   code?: string;
 }
 
 export interface VideoPlayerProps {
+  /** Proxy stream URL: /api/proxy/stream?id=X&season=Y&episode=Z */
   src: string;
   poster?: string;
   title?: string;
   loading?: boolean;
-  qualities?: QualityLevel[];
-  currentQuality?: QualityLevel | null;
-  onQualityChange?: (q: QualityLevel) => void;
-  subtitles?: SubtitleTrack[];
-  autoPlay?: boolean;
+  qualities?: QualityOption[];
+  subtitles?: SubtitleOption[];
+  /** Unique content ID for autoPlayback key */
+  contentId?: string;
+  /** Called periodically with (currentTime, duration) for server-side progress */
+  onTimeUpdate?: (time: number, duration: number) => void;
   className?: string;
-  initialSeekTime?: number;
-  onTimeUpdate?: (currentTime: number, duration: number) => void;
 }
+
+// ─── Subtitle style presets ──────────────────────────────────
+
+const SUBTITLE_SIZES = [
+  { html: 'Kecil', value: '16px' },
+  { html: 'Sedang', value: '22px' },
+  { html: 'Besar', value: '28px' },
+  { html: 'Sangat Besar', value: '36px' },
+];
+
+const SUBTITLE_BACKGROUNDS = [
+  { html: 'Tanpa Background', value: 'transparent' },
+  { html: 'Semi-transparan', value: 'rgba(0,0,0,0.6)' },
+  { html: 'Hitam Solid', value: 'rgba(0,0,0,0.9)' },
+];
+
+const SUBTITLE_COLORS = [
+  { html: 'Putih', value: '#FFFFFF' },
+  { html: 'Kuning', value: '#FFFF00' },
+];
+
+// ─── Helper: fetch fresh video URL from proxy ────────────────
+
+async function fetchFreshUrl(proxySrc: string): Promise<string> {
+  try {
+    const res = await fetch(proxySrc);
+    const data = await res.json();
+    if (res.ok && data.url) return data.url;
+  } catch {}
+  return '';
+}
+
+// ─── Helper: build proxy URL for a specific resolution ───────
+
+function buildProxyUrl(baseSrc: string, resolution?: number): string {
+  if (!baseSrc.startsWith('/api/proxy/stream')) return baseSrc;
+  try {
+    const url = new URL(baseSrc, window.location.origin);
+    if (resolution) url.searchParams.set('resolution', String(resolution));
+    return url.pathname + url.search;
+  } catch {
+    return baseSrc;
+  }
+}
+
+// ─── Component ───────────────────────────────────────────────
 
 export default function VideoPlayer({
   src,
@@ -34,328 +98,280 @@ export default function VideoPlayer({
   title,
   loading: externalLoading = false,
   qualities = [],
-  currentQuality = null,
-  onQualityChange,
   subtitles = [],
-  autoPlay = false,
-  className = '',
-  initialSeekTime = 0,
+  contentId,
   onTimeUpdate,
+  className = '',
 }: VideoPlayerProps) {
-  const { videoRef, setVideoRef, containerRef, state, actions } = useVideoPlayer({ src, autoPlay });
+  const containerRef = useRef<HTMLDivElement>(null);
+  const artRef = useRef<Artplayer | null>(null);
+  const lastProgressSave = useRef(0);
 
-  const hlsRef = useRef<Hls | null>(null);
-  const [hlsQualities, setHlsQualities] = useState<{ height: number; label: string }[]>([]);
-  const [currentHlsQuality, setCurrentHlsQuality] = useState(-1);
+  // Subtitle style state (persisted in localStorage)
+  const [subFontSize, setSubFontSize] = useState('22px');
+  const [subBackground, setSubBackground] = useState('rgba(0,0,0,0.6)');
+  const [subColor, setSubColor] = useState('#FFFFFF');
 
-  const [activeSubtitle, setActiveSubtitle] = useState<string | null>(null);
-  const [subtitleSettings, setSubtitleSettings] = useState<SubtitleSettings>(DEFAULT_SUBTITLE_SETTINGS);
-
-  const [showControls, setShowControls] = useState(true);
-  const hideTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const [resolvedUrl, setResolvedUrl] = useState('');
-  const [resolving, setResolving] = useState(false);
-  const [resolveError, setResolveError] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-
-  // For preserving time on quality switch only
-  const pendingSeekRef = useRef(0);
-  const initialSeekRef = useRef(initialSeekTime);
-  const lastTimeUpdateRef = useRef(0);
-
-  // Track previous src to detect quality-only changes vs episode changes
-  const prevSrcRef = useRef('');
-
-  useEffect(() => { initialSeekRef.current = initialSeekTime; }, [initialSeekTime]);
-
-  // Load subtitle settings
+  // Load saved subtitle settings
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('sf-subtitle-settings');
-      if (saved) setSubtitleSettings(JSON.parse(saved));
+      const saved = localStorage.getItem('sf-sub-style');
+      if (saved) {
+        const s = JSON.parse(saved);
+        if (s.fontSize) setSubFontSize(s.fontSize);
+        if (s.background) setSubBackground(s.background);
+        if (s.color) setSubColor(s.color);
+      }
     } catch {}
   }, []);
 
-  const saveSubtitleSettings = (s: SubtitleSettings) => {
-    setSubtitleSettings(s);
-    try { localStorage.setItem('sf-subtitle-settings', JSON.stringify(s)); } catch {}
+  const saveSubStyle = (fontSize: string, background: string, color: string) => {
+    try { localStorage.setItem('sf-sub-style', JSON.stringify({ fontSize, background, color })); } catch {}
   };
 
-  // ─── Resolve stream URL ────────────────────────────────────
+  // ─── Initialize ArtPlayer ──────────────────────────────────
 
   useEffect(() => {
-    if (!src) {
-      setResolvedUrl('');
-      setResolveError(false);
-      return;
+    if (!containerRef.current || !src || externalLoading) return;
+
+    // Destroy previous instance
+    if (artRef.current) {
+      artRef.current.destroy(false);
+      artRef.current = null;
     }
 
-    if (!src.startsWith('/api/proxy/stream')) {
-      setResolvedUrl(src);
-      setResolveError(false);
-      prevSrcRef.current = src;
-      return;
-    }
-
-    let cancelled = false;
-    setResolving(true);
-    setResolveError(false);
-
-    // Detect if this is a quality-only change (same id+season+episode, different resolution)
-    // vs an episode/content change
-    const isQualitySwitch = isOnlyResolutionChange(prevSrcRef.current, src);
-    prevSrcRef.current = src;
-
-    // Only preserve time for quality switches, NOT episode changes
-    if (isQualitySwitch) {
-      const video = videoRef.current;
-      if (video && video.currentTime > 1 && !isNaN(video.currentTime)) {
-        pendingSeekRef.current = video.currentTime;
-      }
-    } else {
-      // Episode/content change: reset seek
-      pendingSeekRef.current = 0;
-    }
+    let destroyed = false;
 
     (async () => {
-      try {
-        const res = await fetch(src);
-        const data = await res.json();
-        if (res.ok && data.url && !cancelled) {
-          setResolvedUrl(data.url);
-          setRetryCount(0);
-        } else if (!cancelled) {
-          setResolveError(true);
-        }
-      } catch {
-        if (!cancelled) setResolveError(true);
+      // Fetch fresh video URL from proxy
+      const videoUrl = await fetchFreshUrl(src);
+      if (destroyed || !videoUrl || !containerRef.current) return;
+
+      // Build quality list with fresh URLs fetched on-demand
+      const qualityList = qualities.map((q, i) => ({
+        default: i === qualities.length - 1, // highest = default
+        html: `${q.resolution}p`,
+        url: videoUrl, // initial URL (will be refreshed on switch)
+        _resolution: q.resolution,
+      }));
+
+      // Build subtitle settings for the settings panel
+      const subtitleSettings: any[] = [];
+
+      if (subtitles.length > 0) {
+        // Subtitle language selector
+        subtitleSettings.push({
+          html: 'Subtitle',
+          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 12h4m-2-2v4m4-2h4"/></svg>',
+          tooltip: 'Off',
+          selector: [
+            { html: 'Off', default: true },
+            ...subtitles.map(sub => ({
+              html: sub.language,
+              url: sub.url,
+              _code: sub.code,
+            })),
+          ],
+          onSelect(item: any) {
+            if (item.html === 'Off') {
+              artRef.current!.subtitle.show = false;
+              return item.html;
+            }
+            artRef.current!.subtitle.show = true;
+            artRef.current!.subtitle.switch(item.url, { name: item.html });
+            return item.html;
+          },
+        });
+
+        // Font size
+        subtitleSettings.push({
+          html: 'Ukuran Subtitle',
+          tooltip: SUBTITLE_SIZES.find(s => s.value === subFontSize)?.html || 'Sedang',
+          selector: SUBTITLE_SIZES.map(s => ({
+            html: s.html,
+            _value: s.value,
+            default: s.value === subFontSize,
+          })),
+          onSelect(item: any) {
+            setSubFontSize(item._value);
+            saveSubStyle(item._value, subBackground, subColor);
+            if (artRef.current) {
+              artRef.current.subtitle.style({ fontSize: item._value });
+            }
+            return item.html;
+          },
+        });
+
+        // Background
+        subtitleSettings.push({
+          html: 'Background Subtitle',
+          tooltip: SUBTITLE_BACKGROUNDS.find(s => s.value === subBackground)?.html || 'Semi-transparan',
+          selector: SUBTITLE_BACKGROUNDS.map(s => ({
+            html: s.html,
+            _value: s.value,
+            default: s.value === subBackground,
+          })),
+          onSelect(item: any) {
+            setSubBackground(item._value);
+            saveSubStyle(subFontSize, item._value, subColor);
+            if (artRef.current) {
+              artRef.current.subtitle.style({ backgroundColor: item._value });
+            }
+            return item.html;
+          },
+        });
+
+        // Color
+        subtitleSettings.push({
+          html: 'Warna Subtitle',
+          tooltip: SUBTITLE_COLORS.find(s => s.value === subColor)?.html || 'Putih',
+          selector: SUBTITLE_COLORS.map(s => ({
+            html: s.html,
+            _value: s.value,
+            default: s.value === subColor,
+          })),
+          onSelect(item: any) {
+            setSubColor(item._value);
+            saveSubStyle(subFontSize, subBackground, item._value);
+            if (artRef.current) {
+              artRef.current.subtitle.style({ color: item._value });
+            }
+            return item.html;
+          },
+        });
       }
-      if (!cancelled) setResolving(false);
+
+      // Create ArtPlayer instance
+      const art = new Artplayer({
+        container: containerRef.current!,
+        url: videoUrl,
+        poster: poster || '',
+        theme: '#8b5cf6',
+        volume: 0.8,
+        lang: 'en',
+
+        // ─── Built-in features ─────────────────────────
+        hotkey: true,
+        pip: true,
+        fullscreen: true,
+        fullscreenWeb: true,
+        setting: true,
+        playbackRate: true,
+        aspectRatio: true,
+        flip: true,
+        lock: true,
+        gesture: true,
+        fastForward: true,
+        autoPlayback: true,
+        miniProgressBar: true,
+        playsInline: true,
+        mutex: true,
+        backdrop: true,
+
+        // ─── Unique ID for autoPlayback ────────────────
+        id: contentId || src,
+
+        // ─── Quality selector ──────────────────────────
+        quality: qualityList.length > 1 ? qualityList : [],
+
+        // ─── Subtitle (first one as default, or empty) ─
+        subtitle: subtitles.length > 0 ? {
+          url: subtitles[0].url,
+          type: 'srt',
+          style: {
+            color: subColor,
+            fontSize: subFontSize,
+            backgroundColor: subBackground,
+            padding: '4px 8px',
+            borderRadius: '4px',
+            textShadow: '0 2px 4px rgba(0,0,0,0.8)',
+            bottom: '60px',
+          },
+          encoding: 'utf-8',
+        } : {},
+
+        // ─── Custom settings (subtitle style) ──────────
+        settings: subtitleSettings,
+
+        // ─── HLS support via hls.js ────────────────────
+        customType: {
+          m3u8: function (video: HTMLVideoElement, url: string) {
+            if (Hls.isSupported()) {
+              const hls = new Hls({ enableWorker: true, maxBufferLength: 30 });
+              hls.loadSource(url);
+              hls.attachMedia(video);
+              hls.on(Hls.Events.ERROR, (_e, data) => {
+                if (data.fatal) {
+                  if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+                  else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                }
+              });
+              // Store hls instance for cleanup
+              (art as any)._hls = hls;
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+              video.src = url;
+            }
+          },
+        },
+      });
+
+      artRef.current = art;
+
+      // ─── Quality switch handler (fetch fresh URL) ────
+      art.on('video:quality', async (quality: any) => {
+        if (!quality._resolution) return;
+        const proxyUrl = buildProxyUrl(src, quality._resolution);
+        const freshUrl = await fetchFreshUrl(proxyUrl);
+        if (freshUrl && artRef.current) {
+          artRef.current.switchQuality(freshUrl);
+        }
+      });
+
+      // ─── Server-side progress saving ─────────────────
+      if (onTimeUpdate) {
+        art.on('video:timeupdate', () => {
+          const now = Math.floor(art.currentTime);
+          if (now > 0 && now % 10 === 0 && now !== lastProgressSave.current) {
+            lastProgressSave.current = now;
+            onTimeUpdate(art.currentTime, art.duration);
+          }
+        });
+      }
     })();
 
-    return () => { cancelled = true; };
-  }, [src, retryCount]);
-
-  // ─── Source init ───────────────────────────────────────────
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !resolvedUrl) return;
-
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; setHlsQualities([]); }
-
-    const isHls = resolvedUrl.includes('.m3u8');
-
-    if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, maxBufferLength: 30 });
-      hls.loadSource(resolvedUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
-        setHlsQualities(data.levels.map(l => ({ height: l.height, label: `${l.height}p` })));
-        setCurrentHlsQuality(-1);
-        applyPendingSeek(video);
-      });
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-          else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-          else hls.destroy();
+    return () => {
+      destroyed = true;
+      if (artRef.current) {
+        // Cleanup HLS
+        if ((artRef.current as any)._hls) {
+          (artRef.current as any)._hls.destroy();
         }
-      });
-      hlsRef.current = hls;
-    } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = resolvedUrl;
-      video.addEventListener('loadeddata', () => applyPendingSeek(video), { once: true });
-    } else {
-      video.src = resolvedUrl;
-      video.load();
-      video.addEventListener('loadeddata', () => applyPendingSeek(video), { once: true });
-    }
-
-    return () => { if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; } };
-  }, [resolvedUrl]);
-
-  const applyPendingSeek = (video: HTMLVideoElement) => {
-    if (pendingSeekRef.current > 1) {
-      video.currentTime = pendingSeekRef.current;
-      pendingSeekRef.current = 0;
-    } else if (initialSeekRef.current > 1) {
-      video.currentTime = initialSeekRef.current;
-      initialSeekRef.current = 0;
-    }
-  };
-
-  // ─── Time update for progress saving ──────────────────────
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !onTimeUpdate) return;
-    const handler = () => {
-      const now = Math.floor(video.currentTime);
-      if (now > 0 && now !== lastTimeUpdateRef.current && now % 10 === 0) {
-        lastTimeUpdateRef.current = now;
-        onTimeUpdate(video.currentTime, video.duration || 0);
+        artRef.current.destroy(false);
+        artRef.current = null;
       }
     };
-    video.addEventListener('timeupdate', handler);
-    return () => video.removeEventListener('timeupdate', handler);
-  }, [onTimeUpdate, videoRef.current]);
+  }, [src, externalLoading]); // Re-init when src changes (episode/content switch)
 
-  // ─── HLS Quality ──────────────────────────────────────────
+  // ─── Loading state ─────────────────────────────────────────
 
-  const handleHlsQualityChange = useCallback((index: number) => {
-    if (hlsRef.current) { hlsRef.current.currentLevel = index; setCurrentHlsQuality(index); }
-  }, []);
+  if (externalLoading || !src) {
+    return (
+      <div className={`relative w-full aspect-video bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center ${className}`}>
+        {poster && <img src={poster} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20" />}
+        <div className="text-center z-10">
+          <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-gray-400 text-sm">Memuat video...</p>
+        </div>
+      </div>
+    );
+  }
 
-  // ─── Subtitle ─────────────────────────────────────────────
-
-  const handleSubtitleChange = useCallback((code: string | null) => {
-    setActiveSubtitle(code);
-    const video = videoRef.current;
-    if (!video) return;
-    for (let i = 0; i < video.textTracks.length; i++) {
-      const track = video.textTracks[i];
-      const isActive = code && (track.language === code || track.label?.toLowerCase().includes(code.toLowerCase()));
-      track.mode = isActive ? 'hidden' : 'disabled';
-    }
-  }, []);
-
-  // ─── Controls auto-hide ───────────────────────────────────
-
-  const showControlsTemporarily = useCallback(() => {
-    setShowControls(true);
-    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
-    if (state.playing) {
-      hideTimerRef.current = setTimeout(() => setShowControls(false), 2500);
-    }
-  }, [state.playing]);
-
-  useEffect(() => {
-    if (!state.playing) { setShowControls(true); if (hideTimerRef.current) clearTimeout(hideTimerRef.current); }
-    else showControlsTemporarily();
-  }, [state.playing, showControlsTemporarily]);
-
-  // ─── Keyboard ─────────────────────────────────────────────
-
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
-      switch (e.key.toLowerCase()) {
-        case ' ': case 'k': e.preventDefault(); actions.togglePlay(); showControlsTemporarily(); break;
-        case 'f': e.preventDefault(); actions.toggleFullscreen(); break;
-        case 'm': e.preventDefault(); actions.toggleMute(); showControlsTemporarily(); break;
-        case 'j': case 'arrowleft': e.preventDefault(); actions.skip(-10); showControlsTemporarily(); break;
-        case 'l': case 'arrowright': e.preventDefault(); actions.skip(10); showControlsTemporarily(); break;
-        case 'arrowup': e.preventDefault(); actions.setVolume(state.volume + 0.1); showControlsTemporarily(); break;
-        case 'arrowdown': e.preventDefault(); actions.setVolume(state.volume - 0.1); showControlsTemporarily(); break;
-      }
-    };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [actions, state.volume, showControlsTemporarily]);
-
-  const handleRetry = () => { setResolveError(false); setRetryCount(c => c + 1); };
-
-  // ─── Render ───────────────────────────────────────────────
-
-  const isLoading = externalLoading || resolving || (!resolvedUrl && !!src && !resolveError);
-  const hasError = (state.error || resolveError) && !isLoading;
-  const showVideo = !isLoading && !hasError && !!resolvedUrl;
+  // ─── Render ────────────────────────────────────────────────
 
   return (
     <div
       ref={containerRef}
-      className={`relative w-full bg-black overflow-hidden select-none group ${
-        state.isFullscreen ? 'fixed inset-0 z-[99999] rounded-none' : 'aspect-video rounded-xl'
-      } ${className}`}
-      onMouseMove={showControlsTemporarily}
-      onMouseLeave={() => state.playing && setShowControls(false)}
-      onTouchStart={showControlsTemporarily}
-      tabIndex={0}
-    >
-      <video
-        ref={setVideoRef}
-        poster={poster}
-        className={`w-full h-full object-contain ${showVideo ? '' : 'invisible'}`}
-        playsInline preload="metadata" crossOrigin="anonymous"
-      >
-        {subtitles.map((sub) => (
-          <track key={sub.code || sub.language} kind="subtitles" src={sub.url} srcLang={sub.code || 'en'} label={sub.language} />
-        ))}
-      </video>
-
-      {showVideo && activeSubtitle && (
-        <SubtitleOverlay videoRef={videoRef} activeSubtitle={activeSubtitle} settings={subtitleSettings} />
-      )}
-
-      {(isLoading || !src) && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-neutral-900">
-          {poster && <img src={poster} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20" />}
-          <div className="text-center z-10">
-            <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-gray-400 text-sm">Memuat video...</p>
-          </div>
-        </div>
-      )}
-
-      {hasError && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-neutral-900">
-          <div className="text-center">
-            <div className="text-4xl mb-3">⚠️</div>
-            <p className="text-gray-400 text-sm">Video tidak dapat dimuat</p>
-            <button onClick={handleRetry} className="mt-3 bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors">
-              Coba Lagi
-            </button>
-          </div>
-        </div>
-      )}
-
-      {showVideo && (
-        <PlayerOverlay playing={state.playing} loading={state.loading} onTogglePlay={actions.togglePlay} onSkip={actions.skip} showControls={showControls} />
-      )}
-
-      {showVideo && (
-        <PlayerControls
-          state={state}
-          onTogglePlay={actions.togglePlay} onSkip={actions.skip} onSeek={actions.seek}
-          onVolumeChange={actions.setVolume} onToggleMute={actions.toggleMute}
-          onSpeedChange={actions.setPlaybackSpeed} onToggleFullscreen={actions.toggleFullscreen} onTogglePiP={actions.togglePiP}
-          qualities={qualities} currentQuality={currentQuality} onQualityChange={onQualityChange || (() => {})}
-          hlsQualities={hlsQualities} currentHlsQuality={currentHlsQuality} onHlsQualityChange={handleHlsQualityChange}
-          subtitles={subtitles} activeSubtitle={activeSubtitle} onSubtitleChange={handleSubtitleChange}
-          subtitleSettings={subtitleSettings} onSubtitleSettingsChange={saveSubtitleSettings}
-          visible={showControls || !state.playing}
-        />
-      )}
-
-      {showVideo && title && (
-        <div className={`absolute top-0 left-0 right-0 z-20 p-3 sm:p-4 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}>
-          <p className="text-white/90 text-sm font-medium truncate drop-shadow-lg">{title}</p>
-        </div>
-      )}
-    </div>
+      className={`w-full aspect-video rounded-xl overflow-hidden ${className}`}
+    />
   );
-}
-
-/** Check if two proxy URLs differ only in resolution param */
-function isOnlyResolutionChange(prevSrc: string, newSrc: string): boolean {
-  if (!prevSrc || !newSrc) return false;
-  try {
-    const prev = new URL(prevSrc, 'http://x');
-    const next = new URL(newSrc, 'http://x');
-    // Same path?
-    if (prev.pathname !== next.pathname) return false;
-    // Compare all params except resolution
-    const prevId = prev.searchParams.get('id');
-    const nextId = next.searchParams.get('id');
-    const prevSe = prev.searchParams.get('season');
-    const nextSe = next.searchParams.get('season');
-    const prevEp = prev.searchParams.get('episode');
-    const nextEp = next.searchParams.get('episode');
-    // Same content + same episode = quality switch
-    return prevId === nextId && prevSe === nextSe && prevEp === nextEp;
-  } catch {
-    return false;
-  }
 }

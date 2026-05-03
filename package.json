@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "artplayer": "^5.4.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.9.0",
     "cookie": "^1.1.1",
@@ -16,7 +17,6 @@
     "framer-motion": "^12.38.0",
     "hls.js": "^1.6.16",
     "jsonwebtoken": "^9.0.3",
-    "lucide-react": "^1.14.0",
     "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18"
