@@ -4,8 +4,6 @@ import { motion } from 'framer-motion';
 const CHUNK_SIZE = 50;
 
 export default function EpisodeList({ episodes, currentEpisode, onEpisodeSelect }) {
-  const [imageLoaded, setImageLoaded] = useState({});
-
   // Buat daftar range (1-50, 51-100, dst)
   const ranges = useMemo(() => {
     if (!episodes || episodes.length === 0) return [];
@@ -18,19 +16,12 @@ export default function EpisodeList({ episodes, currentEpisode, onEpisodeSelect 
     return chunks;
   }, [episodes]);
 
-  // Auto-select range yang berisi episode aktif
   const defaultRange = useMemo(() => {
     if (!currentEpisode || ranges.length === 0) return 0;
     return ranges.findIndex(r => currentEpisode >= r.start && currentEpisode <= r.end) || 0;
   }, [currentEpisode, ranges]);
 
   const [activeRange, setActiveRange] = useState(defaultRange);
-
-  // Update activeRange kalau currentEpisode berubah ke range lain
-  const currentRangeIdx = ranges.findIndex(r => currentEpisode >= r.start && currentEpisode <= r.end);
-  if (currentRangeIdx !== -1 && currentRangeIdx !== activeRange && currentRangeIdx !== defaultRange) {
-    // Tidak perlu auto-switch, biarkan user pilih manual
-  }
 
   if (!episodes || episodes.length === 0) return null;
 
@@ -84,24 +75,24 @@ export default function EpisodeList({ episodes, currentEpisode, onEpisodeSelect 
                 : 'hover:bg-white/5'
             }`}
           >
-            {/* Thumbnail */}
+            {/* Thumbnail - always use film poster/cover */}
             <div className="relative w-28 h-16 flex-shrink-0 rounded-md overflow-hidden bg-dark-400">
               <img
                 src={ep.thumbnail}
                 alt={ep.title}
-                className={`w-full h-full object-cover transition-opacity ${
-                  imageLoaded[ep.id] ? 'opacity-100' : 'opacity-0'
-                }`}
-                onLoad={() => setImageLoaded(prev => ({ ...prev, [ep.id]: true }))}
-                loading="lazy"
+                className="w-full h-full object-cover"
               />
-              {!imageLoaded[ep.id] && <div className="absolute inset-0 skeleton" />}
 
               {/* Play overlay */}
               <div className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity">
                 <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 20 20">
                   <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
                 </svg>
+              </div>
+
+              {/* Episode number badge */}
+              <div className="absolute top-1 left-1 bg-black/70 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+                {ep.number}
               </div>
 
               {/* Now playing indicator */}
@@ -127,14 +118,16 @@ export default function EpisodeList({ episodes, currentEpisode, onEpisodeSelect 
                 <span className={`text-sm font-semibold ${
                   currentEpisode === ep.number ? 'text-primary-400' : 'text-white'
                 }`}>
-                  Ep {ep.number}
+                  Episode {ep.number}
                 </span>
                 {currentEpisode === ep.number && (
                   <span className="badge badge-primary text-[10px]">Playing</span>
                 )}
               </div>
-              <p className="text-xs text-gray-400 line-clamp-2 mt-0.5">{ep.description}</p>
-              <span className="text-[11px] text-gray-500 mt-1 block">{ep.duration}</span>
+              {ep.episodeTitle && ep.episodeTitle !== ep.title && (
+                <p className="text-xs text-gray-300 line-clamp-1 mt-0.5">{ep.episodeTitle}</p>
+              )}
+              {ep.duration && <span className="text-[11px] text-gray-500 mt-1 block">{ep.duration}</span>}
             </div>
           </motion.button>
         ))}

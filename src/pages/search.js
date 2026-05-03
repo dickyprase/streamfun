@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import { motion } from 'framer-motion';
@@ -14,16 +14,18 @@ export default function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const [total, setTotal] = useState(0);
+  const debounceRef = useRef(null);
 
+  // Sync query from URL on mount
   useEffect(() => {
-    if (q) {
+    if (q && typeof q === 'string') {
       setQuery(q);
       performSearch(q);
     }
   }, [q]);
 
   const performSearch = useCallback(async (searchQuery) => {
-    if (!searchQuery.trim()) {
+    if (!searchQuery || !searchQuery.trim()) {
       setResults([]);
       setSearched(false);
       return;
@@ -32,7 +34,7 @@ export default function SearchPage() {
     setSearched(true);
 
     try {
-      const res = await fetch(`/api/proxy/search?q=${encodeURIComponent(searchQuery)}&page=1`);
+      const res = await fetch(`/api/proxy/search?q=${encodeURIComponent(searchQuery.trim())}&page=1`);
       if (res.ok) {
         const data = await res.json();
         setResults(data.items || []);
@@ -44,11 +46,34 @@ export default function SearchPage() {
     setLoading(false);
   }, []);
 
+  // Live search: debounce 500ms after typing
+  const handleInputChange = (e) => {
+    const value = e.target.value;
+    setQuery(value);
+
+    // Clear previous debounce
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    if (value.trim().length >= 2) {
+      debounceRef.current = setTimeout(() => {
+        performSearch(value.trim());
+        // Update URL without full navigation
+        router.replace(`/search?q=${encodeURIComponent(value.trim())}`, undefined, { shallow: true });
+      }, 500);
+    } else if (value.trim().length === 0) {
+      setResults([]);
+      setSearched(false);
+      setTotal(0);
+    }
+  };
+
+  // Immediate search on Enter/submit
   const handleSubmit = (e) => {
     e.preventDefault();
+    if (debounceRef.current) clearTimeout(debounceRef.current);
     if (query.trim()) {
-      router.push(`/search?q=${encodeURIComponent(query.trim())}`, undefined, { shallow: true });
-      performSearch(query);
+      router.replace(`/search?q=${encodeURIComponent(query.trim())}`, undefined, { shallow: true });
+      performSearch(query.trim());
     }
   };
 
@@ -76,11 +101,17 @@ export default function SearchPage() {
               <input
                 type="text"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={handleInputChange}
                 placeholder="Cari film, series, anime, genre..."
                 className="w-full bg-dark-300 text-white rounded-xl py-3 pl-11 pr-4 focus:outline-none focus:ring-2 focus:ring-primary-500 text-sm border border-dark-400 focus:border-primary-500 transition-colors"
                 autoFocus
               />
+              {/* Live search indicator */}
+              {loading && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className="w-4 h-4 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
             </div>
             <motion.button
               whileTap={{ scale: 0.95 }}
@@ -90,9 +121,14 @@ export default function SearchPage() {
               Cari
             </motion.button>
           </form>
+
+          {/* Typing hint */}
+          {query.length > 0 && query.length < 2 && (
+            <p className="text-gray-500 text-xs mt-2">Ketik minimal 2 karakter untuk pencarian otomatis...</p>
+          )}
         </motion.div>
 
-        {/* Popular Searches */}
+        {/* Popular Searches (when no query) */}
         {!searched && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}>
             <h3 className="text-sm font-semibold text-gray-400 mb-3">Pencarian Populer</h3>
@@ -100,7 +136,11 @@ export default function SearchPage() {
               {popularSearches.map(term => (
                 <button
                   key={term}
-                  onClick={() => { setQuery(term); performSearch(term); router.push(`/search?q=${term}`, undefined, { shallow: true }); }}
+                  onClick={() => {
+                    setQuery(term);
+                    performSearch(term);
+                    router.replace(`/search?q=${encodeURIComponent(term)}`, undefined, { shallow: true });
+                  }}
                   className="px-4 py-2 rounded-full text-sm font-medium bg-dark-300 text-gray-300 hover:bg-primary-500/20 hover:text-primary-400 transition-colors"
                 >
                   {term}

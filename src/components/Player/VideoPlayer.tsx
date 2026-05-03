@@ -3,14 +3,10 @@
 /**
  * VideoPlayer - ArtPlayer wrapper for Next.js
  *
- * Features (all handled by ArtPlayer natively):
- * - Quality switching with time preservation
- * - Subtitle display with custom styling (font size, bg, color)
- * - Resume playback (autoPlayback localStorage + server-side)
- * - Mobile gestures (swipe seek/volume, long-press fast-forward, lock)
- * - Playback speed control
- * - Fullscreen + PiP + keyboard shortcuts
- * - HLS streaming via hls.js
+ * Fixes applied:
+ * - Quality switch via custom settings (not built-in quality option)
+ * - Subtitle: strip <font> tags, escape:false, onVttLoad cleanup
+ * - Default: Indonesian subtitle ON, transparent background
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -22,7 +18,7 @@ import Hls from 'hls.js';
 export interface QualityOption {
   resolution: number;
   label: string;
-  url?: string; // not used directly - we fetch fresh URLs via proxy
+  url?: string;
 }
 
 export interface SubtitleOption {
@@ -32,16 +28,13 @@ export interface SubtitleOption {
 }
 
 export interface VideoPlayerProps {
-  /** Proxy stream URL: /api/proxy/stream?id=X&season=Y&episode=Z */
   src: string;
   poster?: string;
   title?: string;
   loading?: boolean;
   qualities?: QualityOption[];
   subtitles?: SubtitleOption[];
-  /** Unique content ID for autoPlayback key */
   contentId?: string;
-  /** Called periodically with (currentTime, duration) for server-side progress */
   onTimeUpdate?: (time: number, duration: number) => void;
   className?: string;
 }
@@ -66,23 +59,16 @@ const SUBTITLE_COLORS = [
   { html: 'Kuning', value: '#FFFF00' },
 ];
 
-// ─── Helper: fetch fresh video URL from proxy ────────────────
+// ─── Helpers ─────────────────────────────────────────────────
 
 async function fetchFreshUrl(proxySrc: string): Promise<string> {
   try {
-    console.log(`[PLAYER fetchFreshUrl] Fetching: ${proxySrc}`);
     const res = await fetch(proxySrc);
     const data = await res.json();
-    console.log(`[PLAYER fetchFreshUrl] Status: ${res.status}, hasUrl: ${!!data.url}, error: ${data.error || 'none'}`);
     if (res.ok && data.url) return data.url;
-    console.error(`[PLAYER fetchFreshUrl] Failed:`, data);
-  } catch (err) {
-    console.error(`[PLAYER fetchFreshUrl] Exception:`, err);
-  }
+  } catch {}
   return '';
 }
-
-// ─── Helper: build proxy URL for a specific resolution ───────
 
 function buildProxyUrl(baseSrc: string, resolution?: number): string {
   if (!baseSrc.startsWith('/api/proxy/stream')) return baseSrc;
@@ -93,6 +79,23 @@ function buildProxyUrl(baseSrc: string, resolution?: number): string {
   } catch {
     return baseSrc;
   }
+}
+
+/** Strip HTML <font> tags from subtitle text but keep content */
+function stripFontTags(vtt: string): string {
+  return vtt.replace(/<\/?font[^>]*>/gi, '');
+}
+
+/** Find Indonesian subtitle from list, fallback to first */
+function findDefaultSubtitle(subs: SubtitleOption[]): SubtitleOption | null {
+  if (subs.length === 0) return null;
+  // Try Indonesian variants
+  const indo = subs.find(s =>
+    s.code === 'in_id' || s.code === 'id' || s.code === 'in' ||
+    s.language?.toLowerCase().includes('indonesian') ||
+    s.language?.toLowerCase().includes('indonesia')
+  );
+  return indo || subs[0];
 }
 
 // ─── Component ───────────────────────────────────────────────
@@ -111,10 +114,11 @@ export default function VideoPlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const artRef = useRef<Artplayer | null>(null);
   const lastProgressSave = useRef(0);
+  const srcRef = useRef(src); // track src for quality switch proxy URL
 
-  // Subtitle style state (persisted in localStorage)
+  // Subtitle style state - DEFAULT: transparent background
   const [subFontSize, setSubFontSize] = useState('22px');
-  const [subBackground, setSubBackground] = useState('rgba(0,0,0,0.6)');
+  const [subBackground, setSubBackground] = useState('transparent');
   const [subColor, setSubColor] = useState('#FFFFFF');
 
   // Load saved subtitle settings
@@ -124,7 +128,7 @@ export default function VideoPlayer({
       if (saved) {
         const s = JSON.parse(saved);
         if (s.fontSize) setSubFontSize(s.fontSize);
-        if (s.background) setSubBackground(s.background);
+        if (s.background !== undefined) setSubBackground(s.background);
         if (s.color) setSubColor(s.color);
       }
     } catch {}
@@ -134,12 +138,14 @@ export default function VideoPlayer({
     try { localStorage.setItem('sf-sub-style', JSON.stringify({ fontSize, background, color })); } catch {}
   };
 
+  // Keep srcRef in sync
+  useEffect(() => { srcRef.current = src; }, [src]);
+
   // ─── Initialize ArtPlayer ──────────────────────────────────
 
   useEffect(() => {
     if (!containerRef.current || !src || externalLoading) return;
 
-    // Destroy previous instance
     if (artRef.current) {
       artRef.current.destroy(false);
       artRef.current = null;
@@ -147,41 +153,54 @@ export default function VideoPlayer({
 
     let destroyed = false;
 
-    console.log(`[PLAYER] Init: src=${src}, qualities=${qualities.length}, subtitles=${subtitles.length}`);
-
     (async () => {
-      // Fetch fresh video URL from proxy
-      console.log(`[PLAYER] Fetching fresh URL from: ${src}`);
       const videoUrl = await fetchFreshUrl(src);
-      console.log(`[PLAYER] Resolved URL: ${videoUrl ? videoUrl.substring(0, 80) + '...' : 'EMPTY/NULL'}`);
-      if (destroyed || !videoUrl || !containerRef.current) {
-        console.log(`[PLAYER] Aborted: destroyed=${destroyed}, hasUrl=${!!videoUrl}, hasContainer=${!!containerRef.current}`);
-        return;
+      if (destroyed || !videoUrl || !containerRef.current) return;
+
+      // ─── Find default subtitle (prefer Indonesian) ─────
+      const defaultSub = findDefaultSubtitle(subtitles);
+
+      // ─── Build settings array ──────────────────────────
+      const settingsArray: any[] = [];
+
+      // Quality selector (custom, NOT built-in quality option)
+      if (qualities.length > 1) {
+        const highestRes = qualities[qualities.length - 1]?.resolution;
+        settingsArray.push({
+          html: 'Kualitas',
+          tooltip: highestRes ? `${highestRes}p` : 'Auto',
+          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
+          selector: qualities.map((q, i) => ({
+            html: `${q.resolution}p${q.resolution >= 1080 ? ' HD' : ''}`,
+            _resolution: q.resolution,
+            default: i === qualities.length - 1,
+          })),
+          onSelect(item: any) {
+            // Fetch fresh URL for selected resolution
+            const proxyUrl = buildProxyUrl(srcRef.current, item._resolution);
+            fetchFreshUrl(proxyUrl).then(freshUrl => {
+              if (freshUrl && artRef.current) {
+                artRef.current.switchQuality(freshUrl);
+              }
+            });
+            return item.html;
+          },
+        });
       }
 
-      // Build quality list with fresh URLs fetched on-demand
-      const qualityList = qualities.map((q, i) => ({
-        default: i === qualities.length - 1, // highest = default
-        html: `${q.resolution}p`,
-        url: videoUrl, // initial URL (will be refreshed on switch)
-        _resolution: q.resolution,
-      }));
-
-      // Build subtitle settings for the settings panel
-      const subtitleSettings: any[] = [];
-
+      // Subtitle language selector
       if (subtitles.length > 0) {
-        // Subtitle language selector
-        subtitleSettings.push({
+        const defaultSubCode = defaultSub?.code || defaultSub?.language || '';
+        settingsArray.push({
           html: 'Subtitle',
-          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 12h4m-2-2v4m4-2h4"/></svg>',
-          tooltip: 'Off',
+          tooltip: defaultSub ? defaultSub.language : 'Off',
+          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 8h4M7 12h2m4 0h2m-4 4h4"/></svg>',
           selector: [
-            { html: 'Off', default: true },
+            { html: 'Off', default: !defaultSub },
             ...subtitles.map(sub => ({
               html: sub.language,
               url: sub.url,
-              _code: sub.code,
+              default: (sub.code === defaultSubCode || sub.language === defaultSub?.language),
             })),
           ],
           onSelect(item: any) {
@@ -195,65 +214,53 @@ export default function VideoPlayer({
           },
         });
 
-        // Font size
-        subtitleSettings.push({
+        // Font size setting
+        settingsArray.push({
           html: 'Ukuran Subtitle',
           tooltip: SUBTITLE_SIZES.find(s => s.value === subFontSize)?.html || 'Sedang',
           selector: SUBTITLE_SIZES.map(s => ({
-            html: s.html,
-            _value: s.value,
-            default: s.value === subFontSize,
+            html: s.html, _value: s.value, default: s.value === subFontSize,
           })),
           onSelect(item: any) {
             setSubFontSize(item._value);
             saveSubStyle(item._value, subBackground, subColor);
-            if (artRef.current) {
-              artRef.current.subtitle.style({ fontSize: item._value });
-            }
+            artRef.current?.subtitle.style({ fontSize: item._value });
             return item.html;
           },
         });
 
-        // Background
-        subtitleSettings.push({
+        // Background setting
+        settingsArray.push({
           html: 'Background Subtitle',
-          tooltip: SUBTITLE_BACKGROUNDS.find(s => s.value === subBackground)?.html || 'Semi-transparan',
+          tooltip: SUBTITLE_BACKGROUNDS.find(s => s.value === subBackground)?.html || 'Tanpa Background',
           selector: SUBTITLE_BACKGROUNDS.map(s => ({
-            html: s.html,
-            _value: s.value,
-            default: s.value === subBackground,
+            html: s.html, _value: s.value, default: s.value === subBackground,
           })),
           onSelect(item: any) {
             setSubBackground(item._value);
             saveSubStyle(subFontSize, item._value, subColor);
-            if (artRef.current) {
-              artRef.current.subtitle.style({ backgroundColor: item._value });
-            }
+            artRef.current?.subtitle.style({ backgroundColor: item._value });
             return item.html;
           },
         });
 
-        // Color
-        subtitleSettings.push({
+        // Color setting
+        settingsArray.push({
           html: 'Warna Subtitle',
           tooltip: SUBTITLE_COLORS.find(s => s.value === subColor)?.html || 'Putih',
           selector: SUBTITLE_COLORS.map(s => ({
-            html: s.html,
-            _value: s.value,
-            default: s.value === subColor,
+            html: s.html, _value: s.value, default: s.value === subColor,
           })),
           onSelect(item: any) {
             setSubColor(item._value);
             saveSubStyle(subFontSize, subBackground, item._value);
-            if (artRef.current) {
-              artRef.current.subtitle.style({ color: item._value });
-            }
+            artRef.current?.subtitle.style({ color: item._value });
             return item.html;
           },
         });
       }
 
-      // Create ArtPlayer instance
+      // ─── Create ArtPlayer ──────────────────────────────
       const art = new Artplayer({
         container: containerRef.current!,
         url: videoUrl,
@@ -262,7 +269,7 @@ export default function VideoPlayer({
         volume: 0.8,
         lang: 'en',
 
-        // ─── Built-in features ─────────────────────────
+        // Built-in features
         hotkey: true,
         pip: true,
         fullscreen: true,
@@ -280,15 +287,15 @@ export default function VideoPlayer({
         mutex: true,
         backdrop: true,
 
-        // ─── Unique ID for autoPlayback ────────────────
+        // Unique ID for autoPlayback
         id: contentId || src,
 
-        // ─── Quality selector ──────────────────────────
-        quality: qualityList.length > 1 ? qualityList : [],
+        // NO built-in quality (we use custom settings instead)
+        // quality: [],
 
-        // ─── Subtitle (first one as default, or empty) ─
-        subtitle: subtitles.length > 0 ? {
-          url: subtitles[0].url,
+        // Subtitle: default to Indonesian, strip <font> tags
+        subtitle: defaultSub ? {
+          url: defaultSub.url,
           type: 'srt',
           style: {
             color: subColor,
@@ -300,12 +307,16 @@ export default function VideoPlayer({
             bottom: '60px',
           },
           encoding: 'utf-8',
+          escape: false,
+          onVttLoad(vtt: string) {
+            return stripFontTags(vtt);
+          },
         } : {},
 
-        // ─── Custom settings (subtitle style) ──────────
-        settings: subtitleSettings,
+        // Custom settings (quality + subtitle style)
+        settings: settingsArray,
 
-        // ─── HLS support via hls.js ────────────────────
+        // HLS support
         customType: {
           m3u8: function (video: HTMLVideoElement, url: string) {
             if (Hls.isSupported()) {
@@ -318,7 +329,6 @@ export default function VideoPlayer({
                   else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
                 }
               });
-              // Store hls instance for cleanup
               (art as any)._hls = hls;
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
               video.src = url;
@@ -329,26 +339,7 @@ export default function VideoPlayer({
 
       artRef.current = art;
 
-      // ─── Debug: log all video events ─────────────────
-      art.on('ready', () => console.log('[PLAYER] ArtPlayer ready'));
-      art.on('video:error', (err: any) => console.error('[PLAYER] Video error event:', err));
-      art.on('error', (err: any) => console.error('[PLAYER] ArtPlayer error:', err));
-      art.on('video:loadeddata', () => console.log('[PLAYER] Video loadeddata'));
-      art.on('video:canplay', () => console.log('[PLAYER] Video canplay'));
-      art.on('video:playing', () => console.log('[PLAYER] Video playing'));
-      art.on('video:waiting', () => console.log('[PLAYER] Video waiting/buffering'));
-
-      // ─── Quality switch handler (fetch fresh URL) ────
-      art.on('video:quality', async (quality: any) => {
-        if (!quality._resolution) return;
-        const proxyUrl = buildProxyUrl(src, quality._resolution);
-        const freshUrl = await fetchFreshUrl(proxyUrl);
-        if (freshUrl && artRef.current) {
-          artRef.current.switchQuality(freshUrl);
-        }
-      });
-
-      // ─── Server-side progress saving ─────────────────
+      // Server-side progress saving
       if (onTimeUpdate) {
         art.on('video:timeupdate', () => {
           const now = Math.floor(art.currentTime);
@@ -363,15 +354,12 @@ export default function VideoPlayer({
     return () => {
       destroyed = true;
       if (artRef.current) {
-        // Cleanup HLS
-        if ((artRef.current as any)._hls) {
-          (artRef.current as any)._hls.destroy();
-        }
+        if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
         artRef.current.destroy(false);
         artRef.current = null;
       }
     };
-  }, [src, externalLoading]); // Re-init when src changes (episode/content switch)
+  }, [src, externalLoading]);
 
   // ─── Loading state ─────────────────────────────────────────
 
@@ -387,12 +375,7 @@ export default function VideoPlayer({
     );
   }
 
-  // ─── Render ────────────────────────────────────────────────
-
   return (
-    <div
-      ref={containerRef}
-      className={`w-full aspect-video rounded-xl overflow-hidden ${className}`}
-    />
+    <div ref={containerRef} className={`w-full aspect-video rounded-xl overflow-hidden ${className}`} />
   );
 }
