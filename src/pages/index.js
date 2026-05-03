@@ -1,115 +1,139 @@
-import Image from "next/image";
-import localFont from "next/font/local";
-
-const geistSans = localFont({
-  src: "./fonts/GeistVF.woff",
-  variable: "--font-geist-sans",
-  weight: "100 900",
-});
-const geistMono = localFont({
-  src: "./fonts/GeistMonoVF.woff",
-  variable: "--font-geist-mono",
-  weight: "100 900",
-});
+import { useState, useEffect, useCallback } from 'react';
+import Head from 'next/head';
+import { motion } from 'framer-motion';
+import HeroBanner from '@/components/Hero/HeroBanner';
+import CategoryTabs from '@/components/Content/CategoryTabs';
+import ContentGrid from '@/components/Content/ContentGrid';
+import { useAuth } from '@/context/AuthContext';
 
 export default function Home() {
-  return (
-    <div
-      className={`${geistSans.variable} ${geistMono.variable} grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]`}
-    >
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/pages/index.js
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const { siteSettings } = useAuth();
+  const [activeTab, setActiveTab] = useState(0); // tabId from API
+  const [tabs, setTabs] = useState([]);
+  const [sections, setSections] = useState([]);
+  const [banners, setBanners] = useState([]);
+  const [content, setContent] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tabTitle, setTabTitle] = useState('Trending');
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
+  // Fetch tabs on mount
+  useEffect(() => {
+    fetchTabs();
+    fetchHome(0);
+  }, []);
+
+  const fetchTabs = async () => {
+    try {
+      const res = await fetch('/api/proxy/tabs');
+      if (res.ok) {
+        const data = await res.json();
+        setTabs(data.tabs || []);
+      }
+    } catch {}
+  };
+
+  const fetchHome = useCallback(async (tabId) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/proxy/home?tabId=${tabId}`);
+      if (res.ok) {
+        const data = await res.json();
+        const secs = data.sections || [];
+
+        // Extract banners
+        const bannerSection = secs.find(s => s.type === 'BANNER');
+        if (bannerSection) {
+          setBanners(bannerSection.banners);
+        }
+
+        // Extract content items from all non-banner sections
+        const allItems = secs
+          .filter(s => s.type !== 'BANNER' && s.items.length > 0)
+          .flatMap(s => s.items);
+
+        // Remove duplicates by id
+        const uniqueItems = [];
+        const seen = new Set();
+        for (const item of allItems) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id);
+            uniqueItems.push(item);
+          }
+        }
+
+        setContent(uniqueItems);
+        setSections(secs.filter(s => s.type !== 'BANNER'));
+      }
+    } catch (err) {
+      console.error('Failed to fetch home:', err);
+    }
+    setLoading(false);
+  }, []);
+
+  const handleTabChange = (tabId, tabName) => {
+    setActiveTab(tabId);
+    setTabTitle(tabName);
+
+    // For trending tab, use trending endpoint
+    if (tabId === 1) {
+      fetchTrending();
+    } else {
+      fetchHome(tabId);
+    }
+  };
+
+  const fetchTrending = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/proxy/trending?page=1');
+      if (res.ok) {
+        const data = await res.json();
+        setContent(data.items || []);
+      }
+    } catch {}
+    setLoading(false);
+  };
+
+  return (
+    <>
+      <Head>
+        <title>{siteSettings.site_name} - Nonton Film & Series Terbaru</title>
+        <meta name="description" content={siteSettings.site_description} />
+      </Head>
+
+      {/* Hero Banner */}
+      <HeroBanner banners={banners} />
+
+      {/* Category Tabs */}
+      <div className="container py-4">
+        <CategoryTabs
+          tabs={tabs}
+          activeTab={activeTab}
+          onTabChange={handleTabChange}
+        />
+
+        {/* Section Title */}
+        <motion.div
+          key={activeTab}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mt-4 mb-4"
         >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
+          <h2 className="text-lg font-bold text-white">{tabTitle}</h2>
+        </motion.div>
+      </div>
+
+      {/* Content Grid */}
+      <div className="container pb-12">
+        <motion.div
+          key={activeTab}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.3 }}
         >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+          <ContentGrid items={content} loading={loading} />
+        </motion.div>
+      </div>
+    </>
   );
 }
