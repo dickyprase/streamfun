@@ -101,80 +101,52 @@ export function normalizePlayData(data) {
   const processedSources = data.processedSources || [];
   const collectionResolutions = data.collectionResolutions || [];
 
-  // Strategy 1: Multiple downloads with different resolutions (movies)
-  // Group downloads by resolution for current episode
-  const currentEpDownloads = downloads.filter(d => d.url);
+  // Build qualities from direct MP4 downloads
+  let qualities = downloads.filter(d => d.url).map(d => ({
+    resolution: d.resolution || 0,
+    url: d.url,
+    size: parseInt(d.size) || 0,
+    duration: d.duration || 0,
+    codec: d.codecName || '',
+    label: `${d.resolution || 360}p`,
+    isDash: false,
+  }));
 
-  // Check if we have multiple resolutions in downloads directly
-  const resolutionsInDownloads = [...new Set(currentEpDownloads.map(d => d.resolution))];
+  // Add higher resolutions from processedSources (DASH)
+  // ArtPlayer can play DASH via dash.js customType
+  for (const ps of processedSources) {
+    const streamUrl = ps.streamUrl || ps.url;
+    if (!streamUrl) continue;
+    const resStr = ps.resolutions || '';
+    const availableRes = resStr.split(',').map(r => parseInt(r)).filter(r => r > 0).sort((a, b) => a - b);
 
-  let qualities = [];
-
-  if (resolutionsInDownloads.length > 1) {
-    // Movie case: multiple resolutions directly in downloads
-    qualities = currentEpDownloads.map(d => ({
-      resolution: d.resolution || 0,
-      url: d.url,
-      size: parseInt(d.size) || 0,
-      duration: d.duration || 0,
-      codec: d.codecName || '',
-      label: `${d.resolution}p`,
-    }));
-  } else {
-    // Series case: single resolution in downloads, check processedSources for higher quality
-    // Add the default download
-    if (currentEpDownloads.length > 0) {
-      const dl = currentEpDownloads[0];
-      qualities.push({
-        resolution: dl.resolution || 360,
-        url: dl.url,
-        size: parseInt(dl.size) || 0,
-        duration: dl.duration || 0,
-        codec: dl.codecName || '',
-        label: `${dl.resolution || 360}p`,
-      });
+    for (const res of availableRes) {
+      if (!qualities.find(q => q.resolution === res)) {
+        qualities.push({
+          resolution: res,
+          url: streamUrl,
+          size: parseInt(ps.size) || 0,
+          duration: ps.duration || 0,
+          codec: ps.codecName || '',
+          label: `${res}p`,
+          isDash: true,
+        });
+      }
     }
 
-    // Add processedSources (DASH streams with higher quality)
-    for (const ps of processedSources) {
-      if (!ps.streamUrl && !ps.url) continue;
-      const streamUrl = ps.streamUrl || ps.url;
-      const maxRes = ps.quality || parseInt((ps.resolutions || '').split(',')[0]) || 1080;
-
-      // Parse available resolutions from processedSources
-      const resStr = ps.resolutions || '';
-      const availableRes = resStr.split(',').map(r => parseInt(r)).filter(r => r > 0).sort((a, b) => a - b);
-
-      if (availableRes.length > 0) {
-        // Add each resolution from processedSources
-        // The streamUrl serves the highest quality; for lower ones we still use it
-        // (the server handles adaptive streaming)
-        for (const res of availableRes) {
-          if (!qualities.find(q => q.resolution === res)) {
-            qualities.push({
-              resolution: res,
-              url: streamUrl, // Same URL serves adaptive quality
-              size: parseInt(ps.size) || 0,
-              duration: ps.duration || 0,
-              codec: ps.codecName || '',
-              label: `${res}p`,
-              isAdaptive: true,
-            });
-          }
-        }
-      } else if (maxRes > 0) {
-        // Fallback: just add the max resolution
-        if (!qualities.find(q => q.resolution === maxRes)) {
-          qualities.push({
-            resolution: maxRes,
-            url: streamUrl,
-            size: parseInt(ps.size) || 0,
-            duration: ps.duration || 0,
-            codec: ps.codecName || '',
-            label: `${maxRes}p`,
-            isAdaptive: true,
-          });
-        }
+    // If no parsed resolutions but has quality field
+    if (availableRes.length === 0 && ps.quality) {
+      const res = ps.quality;
+      if (!qualities.find(q => q.resolution === res)) {
+        qualities.push({
+          resolution: res,
+          url: streamUrl,
+          size: parseInt(ps.size) || 0,
+          duration: ps.duration || 0,
+          codec: ps.codecName || '',
+          label: `${res}p`,
+          isDash: true,
+        });
       }
     }
   }

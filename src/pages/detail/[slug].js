@@ -189,8 +189,6 @@ export default function DetailPage() {
 
   const handleEpisodeSelect = (ep) => {
     setCurrentEpisode(ep.number);
-    setPlayData(null);
-    initialFetchDone.current = false;
     fetchPlay(currentSeason, ep.number);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -198,8 +196,6 @@ export default function DetailPage() {
   const handleSeasonChange = (season) => {
     setCurrentSeason(season);
     setCurrentEpisode(1);
-    setPlayData(null);
-    initialFetchDone.current = false;
     fetchPlay(season, 1);
   };
 

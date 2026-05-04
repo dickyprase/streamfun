@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
+import * as dashjs from 'dashjs';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -10,6 +11,7 @@ export interface QualityOption {
   resolution: number;
   label: string;
   url?: string;
+  isDash?: boolean;
 }
 
 export interface SubtitleOption {
@@ -50,13 +52,13 @@ const SUB_COLORS = [
 
 // ─── Helpers ─────────────────────────────────────────────────
 
-async function fetchFreshUrl(proxySrc: string): Promise<string> {
+async function fetchFreshUrl(proxySrc: string): Promise<{ url: string; type: string }> {
   try {
     const res = await fetch(proxySrc);
     const data = await res.json();
-    if (res.ok && data.url) return data.url;
+    if (res.ok && data.url) return { url: data.url, type: data.type || 'mp4' };
   } catch {}
-  return '';
+  return { url: '', type: 'mp4' };
 }
 
 function buildProxyUrl(baseSrc: string, resolution: number): string {
@@ -80,6 +82,12 @@ function findIndoSubtitle(subs: SubtitleOption[]): SubtitleOption | null {
     s.language?.toLowerCase().includes('indonesian') ||
     s.language?.toLowerCase().includes('indonesia')
   ) || subs[0];
+}
+
+// ─── Configure ArtPlayer globals ─────────────────────────────
+
+if (typeof window !== 'undefined') {
+  Artplayer.SEEK_STEP = 10; // Arrow keys seek 10 seconds
 }
 
 // ─── Component ───────────────────────────────────────────────
@@ -116,11 +124,16 @@ export default function VideoPlayer({
   useEffect(() => { srcRef.current = src; }, [src]);
 
   // ─── Init ArtPlayer ────────────────────────────────────────
+  // ONLY depends on [src] - NOT externalLoading
+  // This ensures player re-inits immediately when season/episode changes
 
   useEffect(() => {
-    if (!containerRef.current || !src || externalLoading) return;
+    if (!containerRef.current || !src) return;
 
+    // Destroy previous instance
     if (artRef.current) {
+      if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
+      if ((artRef.current as any)._dash) (artRef.current as any)._dash.destroy();
       artRef.current.destroy(false);
       artRef.current = null;
     }
@@ -128,40 +141,49 @@ export default function VideoPlayer({
     let dead = false;
 
     (async () => {
-      const videoUrl = await fetchFreshUrl(src);
+      const { url: videoUrl, type: videoType } = await fetchFreshUrl(src);
       if (dead || !videoUrl || !containerRef.current) return;
 
       const defaultSub = findIndoSubtitle(subtitles);
 
-      // ─── Settings array ────────────────────────────────
+      // ─── Settings ──────────────────────────────────────
       const settings: any[] = [];
 
-      // Quality
+      // Quality selector
       if (qualities.length > 1) {
         const best = qualities[qualities.length - 1];
         settings.push({
           html: 'Kualitas',
           tooltip: `${best.resolution}p`,
-          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
           selector: qualities.map((q, i) => ({
             html: `${q.resolution}p${q.resolution >= 1080 ? ' HD' : ''}`,
             _res: q.resolution,
             default: i === qualities.length - 1,
           })),
           onSelect(item: any) {
-            const art = artRef.current;
-            if (!art) return item.html;
-            const currentTime = art.currentTime;
-            const wasPlaying = art.playing;
             const proxy = buildProxyUrl(srcRef.current, item._res);
-            fetchFreshUrl(proxy).then(url => {
+            fetchFreshUrl(proxy).then(({ url, type }) => {
               if (!url || !artRef.current) return;
-              // Directly set URL and restore position
-              artRef.current.once('video:canplay', () => {
-                artRef.current!.currentTime = currentTime;
-                if (wasPlaying) artRef.current!.play();
-              });
-              artRef.current.url = url;
+              if (type === 'mpd') {
+                // Switch to DASH - need to reinit dash player
+                const art = artRef.current!;
+                const currentTime = art.currentTime;
+                const wasPlaying = art.playing;
+                // Destroy existing dash/hls
+                if ((art as any)._dash) { (art as any)._dash.destroy(); (art as any)._dash = null; }
+                if ((art as any)._hls) { (art as any)._hls.destroy(); (art as any)._hls = null; }
+                // Init new dash
+                const dash = dashjs.MediaPlayer().create();
+                dash.initialize(art.template.$video, url, wasPlaying);
+                (art as any)._dash = dash;
+                dash.on('canPlay' as any, () => {
+                  art.currentTime = currentTime;
+                });
+                art.on('destroy', () => { dash.destroy(); });
+              } else {
+                // MP4 - use switchQuality (preserves time)
+                artRef.current!.switchQuality(url);
+              }
             });
             return item.html;
           },
@@ -173,7 +195,6 @@ export default function VideoPlayer({
         settings.push({
           html: 'Subtitle',
           tooltip: defaultSub?.language || 'Off',
-          icon: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 8h4M7 12h2m4 0h2m-4 4h4"/></svg>',
           selector: [
             { html: 'Off', default: !defaultSub },
             ...subtitles.map(sub => ({
@@ -193,7 +214,6 @@ export default function VideoPlayer({
           },
         });
 
-        // Font size
         settings.push({
           html: 'Ukuran Subtitle',
           tooltip: SUB_SIZES.find(s => s.value === subSize)?.html || 'Sedang',
@@ -205,7 +225,6 @@ export default function VideoPlayer({
           },
         });
 
-        // Background
         settings.push({
           html: 'Background Subtitle',
           tooltip: SUB_BGS.find(s => s.value === subBg)?.html || 'Tanpa Background',
@@ -217,7 +236,6 @@ export default function VideoPlayer({
           },
         });
 
-        // Color
         settings.push({
           html: 'Warna Subtitle',
           tooltip: SUB_COLORS.find(s => s.value === subColor)?.html || 'Putih',
@@ -234,6 +252,7 @@ export default function VideoPlayer({
       const art = new Artplayer({
         container: containerRef.current!,
         url: videoUrl,
+        type: videoType === 'mpd' ? 'mpd' : undefined,
         poster: poster || '',
         theme: '#8b5cf6',
         volume: 0.8,
@@ -250,6 +269,7 @@ export default function VideoPlayer({
         gesture: true,
         fastForward: true,
         autoPlayback: true,
+        autoOrientation: true,
         miniProgressBar: true,
         playsInline: true,
         mutex: true,
@@ -276,7 +296,9 @@ export default function VideoPlayer({
 
         settings,
 
+        // ─── Custom type handlers ────────────────────────
         customType: {
+          // HLS (.m3u8) via hls.js
           m3u8: function (video: HTMLVideoElement, url: string) {
             if (Hls.isSupported()) {
               const hls = new Hls({ enableWorker: true, maxBufferLength: 30 });
@@ -293,31 +315,22 @@ export default function VideoPlayer({
               video.src = url;
             }
           },
+          // DASH (.mpd) via dash.js
+          mpd: function (video: HTMLVideoElement, url: string) {
+            if (dashjs.supportsMediaSource()) {
+              if ((art as any)._dash) (art as any)._dash.destroy();
+              const dash = dashjs.MediaPlayer().create();
+              dash.initialize(video, url, art.option.autoplay);
+              (art as any)._dash = dash;
+              art.on('destroy', () => dash.destroy());
+            } else {
+              art.notice.show = 'Browser tidak mendukung format DASH';
+            }
+          },
         },
       });
 
       artRef.current = art;
-
-      // ─── Fullscreen → landscape ────────────────────────
-      art.on('fullscreen', (state: boolean) => {
-        try {
-          if (state) {
-            (screen.orientation as any)?.lock?.('landscape').catch(() => {});
-          } else {
-            (screen.orientation as any)?.unlock?.();
-          }
-        } catch {}
-      });
-
-      art.on('fullscreenWeb', (state: boolean) => {
-        try {
-          if (state) {
-            (screen.orientation as any)?.lock?.('landscape').catch(() => {});
-          } else {
-            (screen.orientation as any)?.unlock?.();
-          }
-        } catch {}
-      });
 
       // ─── Progress saving ───────────────────────────────
       if (onTimeUpdate) {
@@ -335,18 +348,18 @@ export default function VideoPlayer({
       dead = true;
       if (artRef.current) {
         if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
+        if ((artRef.current as any)._dash) (artRef.current as any)._dash.destroy();
         artRef.current.destroy(false);
         artRef.current = null;
       }
     };
-  }, [src, externalLoading]);
+  }, [src]); // ONLY depend on src - re-init when episode/season/content changes
 
-  // ─── Loading ───────────────────────────────────────────────
+  // ─── Render ────────────────────────────────────────────────
 
-  if (externalLoading || !src) {
+  if (!src) {
     return (
       <div className={`relative w-full aspect-video bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center ${className}`}>
-        {poster && <img src={poster} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20" />}
         <div className="text-center z-10">
           <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           <p className="text-gray-400 text-sm">Memuat video...</p>
@@ -355,5 +368,15 @@ export default function VideoPlayer({
     );
   }
 
-  return <div ref={containerRef} className={`w-full aspect-video rounded-xl overflow-hidden ${className}`} />;
+  return (
+    <div className={`relative w-full aspect-video rounded-xl overflow-hidden ${className}`}>
+      <div ref={containerRef} className="w-full h-full" />
+      {/* Loading overlay (shown while fetching play data, doesn't block player) */}
+      {externalLoading && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 pointer-events-none">
+          <div className="w-8 h-8 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+    </div>
+  );
 }
