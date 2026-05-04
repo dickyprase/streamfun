@@ -128,7 +128,7 @@ export default function VideoPlayer({
   // This ensures player re-inits immediately when season/episode changes
 
   useEffect(() => {
-    if (!containerRef.current || !src) return;
+    if (!containerRef.current || !src || externalLoading) return;
 
     // Destroy previous instance
     if (artRef.current) {
@@ -353,7 +353,7 @@ export default function VideoPlayer({
         artRef.current = null;
       }
     };
-  }, [src]); // ONLY depend on src - re-init when episode/season/content changes
+  }, [src, externalLoading]); // Re-init when src changes OR loading finishes (qualities/subtitles ready)
 
   // ─── Render ────────────────────────────────────────────────
 
