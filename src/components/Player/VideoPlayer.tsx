@@ -152,10 +152,22 @@ export default function VideoPlayer({
       if (dead) return;
       setStreamInfo(info);
 
+      console.log('[VideoPlayer] Stream info:', {
+        mp4Url: info?.url ? '✓' : '✗',
+        mp4Resolution: info?.resolution,
+        mp4Codec: info?.codec,
+        dashUrl: info?.dashUrl ? '✓' : '✗',
+        dashCodec: info?.dashCodec,
+        dashResolutions: info?.dashResolutions,
+        availableQualities: info?.availableQualities?.map(q => `${q.resolution}p ${q.codec}`),
+      });
+
       // Use Shaka Player if DASH URL is available
       if (info?.dashUrl) {
+        console.log('[VideoPlayer] → Using Shaka Player (DASH)');
         setUseShakaPlayer(true);
       } else {
+        console.log('[VideoPlayer] → Using ArtPlayer (MP4)');
         setUseShakaPlayer(false);
       }
       setResolving(false);

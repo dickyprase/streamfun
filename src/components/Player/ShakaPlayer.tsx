@@ -53,7 +53,23 @@ const ShakaPlayer = forwardRef<{ video: () => HTMLVideoElement | null }, ShakaPl
         try {
           await player.load(manifestUrl);
           if (destroyed) return;
-          console.log('[ShakaPlayer] Video loaded successfully!');
+
+          // Log active tracks info
+          const variantTracks = player.getVariantTracks();
+          const activeTracks = variantTracks.filter((t: any) => t.active);
+          console.log('[ShakaPlayer] ✅ Video loaded successfully!');
+          console.log('[ShakaPlayer] Available tracks:', variantTracks.map((t: any) => `${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`));
+          console.log('[ShakaPlayer] Active track:', activeTracks.map((t: any) => `${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`));
+
+          // Log when ABR switches quality
+          player.addEventListener('adaptation', () => {
+            const active = player.getVariantTracks().filter((t: any) => t.active);
+            if (active.length > 0) {
+              const t = active[0];
+              console.log(`[ShakaPlayer] 🔄 ABR switched to: ${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`);
+            }
+          });
+
           onReady?.();
           if (autoPlay) video.play().catch(() => {});
         } catch (e: any) {
