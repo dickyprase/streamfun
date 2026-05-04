@@ -3,6 +3,16 @@
 import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import shaka from 'shaka-player';
 
+// Log to server terminal
+function serverLog(message: string, level = 'info') {
+  fetch('/api/proxy/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, level }),
+  }).catch(() => {});
+}
+
+
 interface ShakaPlayerProps {
   manifestUrl: string;
   poster?: string;
@@ -47,6 +57,7 @@ const ShakaPlayer = forwardRef<{ video: () => HTMLVideoElement | null }, ShakaPl
         player.addEventListener('error', (event: any) => {
           const detail = event.detail;
           console.error('[ShakaPlayer] Error:', detail.code, detail);
+          serverLog(`❌ Shaka Error ${detail.code}: ${detail.message || JSON.stringify(detail)}`, 'error');
           onError?.(`Error ${detail.code}: ${detail.message || 'Unknown error'}`);
         });
 
@@ -57,16 +68,24 @@ const ShakaPlayer = forwardRef<{ video: () => HTMLVideoElement | null }, ShakaPl
           // Log active tracks info
           const variantTracks = player.getVariantTracks();
           const activeTracks = variantTracks.filter((t: any) => t.active);
+          const availableStr = variantTracks.map((t: any) => `${t.height}p/${t.videoCodec}/${Math.round(t.bandwidth/1000)}kbps`).join(', ');
+          const activeStr = activeTracks.map((t: any) => `${t.height}p/${t.videoCodec}/${Math.round(t.bandwidth/1000)}kbps`).join(', ');
+
           console.log('[ShakaPlayer] ✅ Video loaded successfully!');
-          console.log('[ShakaPlayer] Available tracks:', variantTracks.map((t: any) => `${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`));
-          console.log('[ShakaPlayer] Active track:', activeTracks.map((t: any) => `${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`));
+          console.log('[ShakaPlayer] Available:', availableStr);
+          console.log('[ShakaPlayer] Playing:', activeStr);
+
+          serverLog(`✅ Shaka loaded! Available: [${availableStr}]`);
+          serverLog(`▶️ Now playing: ${activeStr}`);
 
           // Log when ABR switches quality
           player.addEventListener('adaptation', () => {
             const active = player.getVariantTracks().filter((t: any) => t.active);
             if (active.length > 0) {
               const t = active[0];
-              console.log(`[ShakaPlayer] 🔄 ABR switched to: ${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`);
+              const msg = `🔄 ABR switched → ${t.height}p ${t.videoCodec} ${Math.round(t.bandwidth/1000)}kbps`;
+              console.log('[ShakaPlayer]', msg);
+              serverLog(msg);
             }
           });
 

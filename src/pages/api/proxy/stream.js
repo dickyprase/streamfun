@@ -65,18 +65,16 @@ export default async function handler(req, res) {
       const mp4Codec = downloads[0]?.codecName || '';
 
       if (mp4Url || dashUrl) {
+        console.log(`[STREAM] ✅ id=${id} season=${se} episode=${ep} → MP4: ${mp4Resolution}p (${mp4Codec}) | DASH: ${dashResolutions || 'none'} (${dashCodec || 'none'})`);
         return res.status(200).json({
           success: true,
-          // Primary: MP4 direct (always works for h264, may work for hevc on some browsers)
           url: mp4Url,
           type: 'mp4',
           resolution: mp4Resolution,
           codec: mp4Codec,
-          // DASH info (for HEVC transcode if needed)
           dashUrl,
           dashCodec,
           dashResolutions,
-          // All available MP4 downloads
           availableQualities: downloads.map(d => ({
             resolution: d.resolution,
             codec: d.codecName || '',
