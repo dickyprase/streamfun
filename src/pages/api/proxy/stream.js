@@ -75,18 +75,17 @@ function extractVideoUrl(data, targetResolution) {
     }
   }
 
-  // 3. If no specific resolution requested, prefer highest quality
-  // Try DASH first (usually has higher quality)
-  if (!targetResolution && processedSources.length > 0) {
-    const ps = processedSources[0];
-    const url = ps.streamUrl || ps.url;
-    if (url) return { url, type: 'mpd' };
-  }
-
-  // 4. Fallback: highest resolution direct MP4 download
+  // 3. Fallback: highest resolution direct MP4 download (always works)
   if (downloads.length > 0) {
     const sorted = [...downloads].sort((a, b) => (b.resolution || 0) - (a.resolution || 0));
     return { url: sorted[0].url, type: 'mp4' };
+  }
+
+  // 4. Last resort: processedSources DASH (may not work with all content)
+  if (processedSources.length > 0) {
+    const ps = processedSources[0];
+    const url = ps.streamUrl || ps.url;
+    if (url) return { url, type: 'mpd' };
   }
 
   return null;
