@@ -52,23 +52,21 @@ const SUB_COLORS = [
 
 // ─── Helpers ─────────────────────────────────────────────────
 
-async function fetchFreshUrl(proxySrc: string): Promise<{ url: string; type: string }> {
+interface StreamResponse {
+  url: string;
+  type: string;
+  downloads?: { resolution: number; url: string }[];
+  hasDash?: boolean;
+  dashResolutions?: string;
+}
+
+async function fetchStream(proxySrc: string): Promise<StreamResponse | null> {
   try {
     const res = await fetch(proxySrc);
     const data = await res.json();
-    if (res.ok && data.url) return { url: data.url, type: data.type || 'mp4' };
+    if (res.ok && data.url) return data;
   } catch {}
-  return { url: '', type: 'mp4' };
-}
-
-function buildProxyUrl(baseSrc: string, resolution: number): string {
-  try {
-    const url = new URL(baseSrc, window.location.origin);
-    url.searchParams.set('resolution', String(resolution));
-    return url.pathname + url.search;
-  } catch {
-    return baseSrc;
-  }
+  return null;
 }
 
 function stripFontTags(vtt: string): string {
@@ -84,10 +82,10 @@ function findIndoSubtitle(subs: SubtitleOption[]): SubtitleOption | null {
   ) || subs[0];
 }
 
-// ─── Configure ArtPlayer globals ─────────────────────────────
+// ─── ArtPlayer globals ───────────────────────────────────────
 
 if (typeof window !== 'undefined') {
-  Artplayer.SEEK_STEP = 10; // Arrow keys seek 10 seconds
+  Artplayer.SEEK_STEP = 10;
 }
 
 // ─── Component ───────────────────────────────────────────────
@@ -100,8 +98,8 @@ export default function VideoPlayer({
 }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const artRef = useRef<Artplayer | null>(null);
+  const dashRef = useRef<any>(null);
   const lastSave = useRef(0);
-  const srcRef = useRef(src);
 
   // Subtitle style (persisted)
   const [subSize, setSubSize] = useState('22px');
@@ -121,19 +119,15 @@ export default function VideoPlayer({
     try { localStorage.setItem('sf-sub-style', JSON.stringify({ fontSize: sz, background: bg, color: cl })); } catch {}
   };
 
-  useEffect(() => { srcRef.current = src; }, [src]);
-
   // ─── Init ArtPlayer ────────────────────────────────────────
-  // ONLY depends on [src] - NOT externalLoading
-  // This ensures player re-inits immediately when season/episode changes
 
   useEffect(() => {
     if (!containerRef.current || !src || externalLoading) return;
 
-    // Destroy previous instance
+    // Cleanup previous
+    if (dashRef.current) { try { dashRef.current.reset(); } catch {} dashRef.current = null; }
     if (artRef.current) {
       if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
-      if ((artRef.current as any)._dash) (artRef.current as any)._dash.destroy();
       artRef.current.destroy(false);
       artRef.current = null;
     }
@@ -141,50 +135,102 @@ export default function VideoPlayer({
     let dead = false;
 
     (async () => {
-      const { url: videoUrl, type: videoType } = await fetchFreshUrl(src);
-      if (dead || !videoUrl || !containerRef.current) return;
+      // Fetch stream info (URL + type + available downloads)
+      const stream = await fetchStream(src);
+      if (dead || !stream || !containerRef.current) return;
 
+      const { url: videoUrl, type: videoType, downloads = [], hasDash, dashResolutions } = stream;
       const defaultSub = findIndoSubtitle(subtitles);
 
-      // ─── Settings ──────────────────────────────────────
+      // ─── Build quality list for settings ───────────────
+      // Combine: MP4 downloads + DASH ABR option
+      const qualityItems: any[] = [];
+
+      if (hasDash) {
+        qualityItems.push({
+          html: 'Auto (ABR)',
+          _type: 'dash',
+          default: true,
+        });
+      }
+
+      // Add MP4 direct downloads
+      downloads.forEach((dl: any) => {
+        qualityItems.push({
+          html: `${dl.resolution}p`,
+          _type: 'mp4',
+          _url: dl.url,
+          _res: dl.resolution,
+          default: !hasDash && dl.resolution === downloads[downloads.length - 1]?.resolution,
+        });
+      });
+
+      // Add DASH resolution labels (for display, handled by ABR)
+      if (hasDash && dashResolutions) {
+        const dashRes = dashResolutions.split(',').map((r: string) => parseInt(r)).filter((r: number) => r > 0);
+        dashRes.forEach((res: number) => {
+          if (!qualityItems.find((q: any) => q._res === res)) {
+            qualityItems.push({
+              html: `${res}p${res >= 1080 ? ' HD' : ''}`,
+              _type: 'dash-force',
+              _res: res,
+              default: false,
+            });
+          }
+        });
+      }
+
+      // Sort: Auto first, then by resolution
+      qualityItems.sort((a: any, b: any) => {
+        if (a._type === 'dash') return -1;
+        if (b._type === 'dash') return 1;
+        return (a._res || 0) - (b._res || 0);
+      });
+
+      // ─── Settings array ────────────────────────────────
       const settings: any[] = [];
 
-      // Quality selector
-      if (qualities.length > 1) {
-        const best = qualities[qualities.length - 1];
+      // Quality
+      if (qualityItems.length > 1) {
         settings.push({
           html: 'Kualitas',
-          tooltip: `${best.resolution}p`,
-          selector: qualities.map((q, i) => ({
-            html: `${q.resolution}p${q.resolution >= 1080 ? ' HD' : ''}`,
-            _res: q.resolution,
-            default: i === qualities.length - 1,
-          })),
+          tooltip: hasDash ? 'Auto (ABR)' : `${downloads[downloads.length - 1]?.resolution || 360}p`,
+          selector: qualityItems,
           onSelect(item: any) {
-            const proxy = buildProxyUrl(srcRef.current, item._res);
-            fetchFreshUrl(proxy).then(({ url, type }) => {
-              if (!url || !artRef.current) return;
-              if (type === 'mpd') {
-                // Switch to DASH - need to reinit dash player
-                const art = artRef.current!;
-                const currentTime = art.currentTime;
-                const wasPlaying = art.playing;
-                // Destroy existing dash/hls
-                if ((art as any)._dash) { (art as any)._dash.destroy(); (art as any)._dash = null; }
-                if ((art as any)._hls) { (art as any)._hls.destroy(); (art as any)._hls = null; }
-                // Init new dash
+            const art = artRef.current;
+            if (!art) return item.html;
+
+            if (item._type === 'dash') {
+              // Switch back to DASH ABR
+              if (!dashRef.current && videoType === 'mpd') {
                 const dash = dashjs.MediaPlayer().create();
-                dash.initialize(art.template.$video, url, wasPlaying);
-                (art as any)._dash = dash;
-                dash.on('canPlay' as any, () => {
-                  art.currentTime = currentTime;
-                });
-                art.on('destroy', () => { dash.destroy(); });
-              } else {
-                // MP4 - use switchQuality (preserves time)
-                artRef.current!.switchQuality(url);
+                dash.initialize(art.template.$video, videoUrl, true);
+                dashRef.current = dash;
+              } else if (dashRef.current) {
+                // Re-enable ABR
+                dashRef.current.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: true } } } });
               }
-            });
+              return item.html;
+            }
+
+            if (item._type === 'dash-force' && dashRef.current) {
+              // Force specific DASH quality
+              const bitrateList = dashRef.current.getBitrateInfoListFor?.('video') || [];
+              const idx = bitrateList.findIndex((b: any) => b.height === item._res);
+              if (idx >= 0) {
+                dashRef.current.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: false } } } });
+                dashRef.current.setQualityFor('video', idx);
+              }
+              return item.html;
+            }
+
+            if (item._type === 'mp4' && item._url) {
+              // Switch to direct MP4 - detach dash.js
+              if (dashRef.current) { try { dashRef.current.reset(); } catch {} dashRef.current = null; }
+              art.switchQuality(item._url);
+              return item.html;
+            }
+
             return item.html;
           },
         });
@@ -204,48 +250,63 @@ export default function VideoPlayer({
             })),
           ],
           onSelect(item: any) {
-            if (item.html === 'Off') {
-              artRef.current!.subtitle.show = false;
-              return item.html;
-            }
+            if (item.html === 'Off') { artRef.current!.subtitle.show = false; return item.html; }
             artRef.current!.subtitle.show = true;
             artRef.current!.subtitle.switch(item.url, { name: item.html });
             return item.html;
           },
         });
 
+        // Subtitle style settings
         settings.push({
           html: 'Ukuran Subtitle',
           tooltip: SUB_SIZES.find(s => s.value === subSize)?.html || 'Sedang',
           selector: SUB_SIZES.map(s => ({ html: s.html, _v: s.value, default: s.value === subSize })),
-          onSelect(item: any) {
-            setSubSize(item._v); saveSub(item._v, subBg, subColor);
-            artRef.current?.subtitle.style({ fontSize: item._v });
-            return item.html;
-          },
+          onSelect(item: any) { setSubSize(item._v); saveSub(item._v, subBg, subColor); artRef.current?.subtitle.style({ fontSize: item._v }); return item.html; },
         });
-
         settings.push({
           html: 'Background Subtitle',
           tooltip: SUB_BGS.find(s => s.value === subBg)?.html || 'Tanpa Background',
           selector: SUB_BGS.map(s => ({ html: s.html, _v: s.value, default: s.value === subBg })),
-          onSelect(item: any) {
-            setSubBg(item._v); saveSub(subSize, item._v, subColor);
-            artRef.current?.subtitle.style({ backgroundColor: item._v });
-            return item.html;
-          },
+          onSelect(item: any) { setSubBg(item._v); saveSub(subSize, item._v, subColor); artRef.current?.subtitle.style({ backgroundColor: item._v }); return item.html; },
         });
-
         settings.push({
           html: 'Warna Subtitle',
           tooltip: SUB_COLORS.find(s => s.value === subColor)?.html || 'Putih',
           selector: SUB_COLORS.map(s => ({ html: s.html, _v: s.value, default: s.value === subColor })),
-          onSelect(item: any) {
-            setSubColor(item._v); saveSub(subSize, subBg, item._v);
-            artRef.current?.subtitle.style({ color: item._v });
-            return item.html;
+          onSelect(item: any) { setSubColor(item._v); saveSub(subSize, subBg, item._v); artRef.current?.subtitle.style({ color: item._v }); return item.html; },
+        });
+      }
+
+      // ─── DASH playback handler ─────────────────────────
+      function playDash(video: HTMLVideoElement, url: string, art: any) {
+        if (dashRef.current) { try { dashRef.current.reset(); } catch {} }
+
+        const player = dashjs.MediaPlayer().create();
+        player.updateSettings({
+          streaming: {
+            abr: { autoSwitchBitrate: { video: true, audio: true } },
+            buffer: { fastSwitchEnabled: true },
           },
         });
+        player.initialize(video, url, false);
+
+        player.on(dashjs.MediaPlayer.events.ERROR as any, (e: any) => {
+          console.error('[DASH] Error:', e.error?.message || e);
+          // Fallback to MP4 if DASH fails
+          if (downloads.length > 0) {
+            const best = downloads.sort((a: any, b: any) => b.resolution - a.resolution)[0];
+            art.notice.show = 'DASH gagal, beralih ke MP4...';
+            setTimeout(() => {
+              player.reset();
+              dashRef.current = null;
+              art.url = best.url;
+            }, 1000);
+          }
+        });
+
+        dashRef.current = player;
+        art.on('destroy', () => { try { player.reset(); } catch {} });
       }
 
       // ─── Create ArtPlayer ──────────────────────────────
@@ -281,13 +342,9 @@ export default function VideoPlayer({
           url: defaultSub.url,
           type: 'srt',
           style: {
-            color: subColor,
-            fontSize: subSize,
-            backgroundColor: subBg,
-            padding: '4px 8px',
-            borderRadius: '4px',
-            textShadow: '0 2px 4px rgba(0,0,0,0.8)',
-            bottom: '60px',
+            color: subColor, fontSize: subSize, backgroundColor: subBg,
+            padding: '4px 8px', borderRadius: '4px',
+            textShadow: '0 2px 4px rgba(0,0,0,0.8)', bottom: '60px',
           },
           encoding: 'utf-8',
           escape: false,
@@ -296,14 +353,11 @@ export default function VideoPlayer({
 
         settings,
 
-        // ─── Custom type handlers ────────────────────────
         customType: {
-          // HLS (.m3u8) via hls.js
           m3u8: function (video: HTMLVideoElement, url: string) {
             if (Hls.isSupported()) {
               const hls = new Hls({ enableWorker: true, maxBufferLength: 30 });
-              hls.loadSource(url);
-              hls.attachMedia(video);
+              hls.loadSource(url); hls.attachMedia(video);
               hls.on(Hls.Events.ERROR, (_e, data) => {
                 if (data.fatal) {
                   if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
@@ -315,24 +369,13 @@ export default function VideoPlayer({
               video.src = url;
             }
           },
-          // DASH (.mpd) via dash.js
-          mpd: function (video: HTMLVideoElement, url: string) {
-            if (dashjs.supportsMediaSource()) {
-              if ((art as any)._dash) (art as any)._dash.destroy();
-              const dash = dashjs.MediaPlayer().create();
-              dash.initialize(video, url, art.option.autoplay);
-              (art as any)._dash = dash;
-              art.on('destroy', () => dash.destroy());
-            } else {
-              art.notice.show = 'Browser tidak mendukung format DASH';
-            }
-          },
+          mpd: playDash,
         },
       });
 
       artRef.current = art;
 
-      // ─── Progress saving ───────────────────────────────
+      // Progress saving
       if (onTimeUpdate) {
         art.on('video:timeupdate', () => {
           const now = Math.floor(art.currentTime);
@@ -346,24 +389,21 @@ export default function VideoPlayer({
 
     return () => {
       dead = true;
+      if (dashRef.current) { try { dashRef.current.reset(); } catch {} dashRef.current = null; }
       if (artRef.current) {
         if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
-        if ((artRef.current as any)._dash) (artRef.current as any)._dash.destroy();
         artRef.current.destroy(false);
         artRef.current = null;
       }
     };
-  }, [src, externalLoading]); // Re-init when src changes OR loading finishes (qualities/subtitles ready)
+  }, [src, externalLoading]);
 
   // ─── Render ────────────────────────────────────────────────
 
   if (!src) {
     return (
       <div className={`relative w-full aspect-video bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center ${className}`}>
-        <div className="text-center z-10">
-          <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-gray-400 text-sm">Memuat video...</p>
-        </div>
+        <div className="w-10 h-10 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
@@ -371,7 +411,6 @@ export default function VideoPlayer({
   return (
     <div className={`relative w-full aspect-video rounded-xl overflow-hidden ${className}`}>
       <div ref={containerRef} className="w-full h-full" />
-      {/* Loading overlay (shown while fetching play data, doesn't block player) */}
       {externalLoading && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 pointer-events-none">
           <div className="w-8 h-8 border-[3px] border-purple-500 border-t-transparent rounded-full animate-spin" />
