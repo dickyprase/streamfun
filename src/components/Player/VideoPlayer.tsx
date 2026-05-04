@@ -1,24 +1,20 @@
 'use client';
 
 /**
- * VideoPlayer - Smart player with HEVC detection
+ * VideoPlayer - Routes between Shaka Player (DASH/HEVC) and ArtPlayer (MP4)
  *
- * Flow:
- * 1. Fetch stream info (MP4 URL + DASH URL + codec info)
- * 2. If codec is H.264 or browser supports HEVC natively → ArtPlayer (MP4)
- * 3. If codec is HEVC and browser doesn't support → H265DashPlayer (WASM transcode)
- * 4. Quality switch: only for MP4 downloads (H.264)
- * 5. Subtitle: always via ArtPlayer settings
+ * Strategy:
+ * - If DASH URL available → use Shaka Player (handles HEVC/DASH natively)
+ * - If only MP4 → use ArtPlayer (quality switch, subtitles, settings)
+ * - Fallback: if Shaka fails → switch to ArtPlayer with MP4
  */
 
 import { useEffect, useRef, useState } from 'react';
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 import dynamic from 'next/dynamic';
-import { browserSupportsHevc, isHevcCodec } from '@/utils/dashParser';
 
-// Dynamic import H265DashPlayer (heavy - FFmpeg WASM)
-const H265DashPlayer = dynamic(() => import('./H265DashPlayer'), { ssr: false });
+const ShakaPlayer = dynamic(() => import('./ShakaPlayer'), { ssr: false });
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -46,24 +42,6 @@ export interface VideoPlayerProps {
   onTimeUpdate?: (time: number, duration: number) => void;
   className?: string;
 }
-
-// ─── Presets ─────────────────────────────────────────────────
-
-const SUB_SIZES = [
-  { html: 'Kecil', value: '16px' },
-  { html: 'Sedang', value: '22px' },
-  { html: 'Besar', value: '28px' },
-  { html: 'Sangat Besar', value: '36px' },
-];
-const SUB_BGS = [
-  { html: 'Tanpa Background', value: 'transparent' },
-  { html: 'Semi-transparan', value: 'rgba(0,0,0,0.6)' },
-  { html: 'Hitam Solid', value: 'rgba(0,0,0,0.9)' },
-];
-const SUB_COLORS = [
-  { html: 'Putih', value: '#FFFFFF' },
-  { html: 'Kuning', value: '#FFFF00' },
-];
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -108,9 +86,20 @@ function buildProxyUrl(baseSrc: string, resolution: number): string {
   } catch { return baseSrc; }
 }
 
-if (typeof window !== 'undefined') {
-  Artplayer.SEEK_STEP = 10;
-}
+const SUB_SIZES = [
+  { html: 'Kecil', value: '16px' }, { html: 'Sedang', value: '22px' },
+  { html: 'Besar', value: '28px' }, { html: 'Sangat Besar', value: '36px' },
+];
+const SUB_BGS = [
+  { html: 'Tanpa Background', value: 'transparent' },
+  { html: 'Semi-transparan', value: 'rgba(0,0,0,0.6)' },
+  { html: 'Hitam Solid', value: 'rgba(0,0,0,0.9)' },
+];
+const SUB_COLORS = [
+  { html: 'Putih', value: '#FFFFFF' }, { html: 'Kuning', value: '#FFFF00' },
+];
+
+if (typeof window !== 'undefined') { Artplayer.SEEK_STEP = 10; }
 
 // ─── Component ───────────────────────────────────────────────
 
@@ -125,10 +114,10 @@ export default function VideoPlayer({
   const lastSave = useRef(0);
   const srcRef = useRef(src);
 
-  // Stream info
   const [streamInfo, setStreamInfo] = useState<StreamInfo | null>(null);
-  const [useWasmTranscode, setUseWasmTranscode] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [useShakaPlayer, setUseShakaPlayer] = useState(false);
+  const [shakaFailed, setShakaFailed] = useState(false);
 
   // Subtitle style
   const [subSize, setSubSize] = useState('22px');
@@ -150,26 +139,24 @@ export default function VideoPlayer({
 
   useEffect(() => { srcRef.current = src; }, [src]);
 
-  // ─── Fetch stream info & detect HEVC ───────────────────────
+  // ─── Fetch stream info ─────────────────────────────────────
 
   useEffect(() => {
     if (!src || externalLoading) { setStreamInfo(null); return; }
-
     let dead = false;
     setResolving(true);
+    setShakaFailed(false);
 
     (async () => {
       const info = await fetchStreamInfo(src);
       if (dead) return;
       setStreamInfo(info);
 
-      if (info) {
-        // Determine if we need WASM transcode
-        const needsTranscode = info.dashUrl &&
-          isHevcCodec(info.dashCodec || info.codec) &&
-          !browserSupportsHevc();
-
-        setUseWasmTranscode(!!needsTranscode);
+      // Use Shaka Player if DASH URL is available
+      if (info?.dashUrl) {
+        setUseShakaPlayer(true);
+      } else {
+        setUseShakaPlayer(false);
       }
       setResolving(false);
     })();
@@ -177,12 +164,12 @@ export default function VideoPlayer({
     return () => { dead = true; };
   }, [src, externalLoading]);
 
-  // ─── Init ArtPlayer (for MP4/non-HEVC playback) ────────────
+  // ─── Init ArtPlayer (MP4 mode / fallback) ──────────────────
 
   useEffect(() => {
-    if (!containerRef.current || !streamInfo || useWasmTranscode || externalLoading) return;
+    // Only init ArtPlayer if NOT using Shaka, or if Shaka failed
+    if (!containerRef.current || !streamInfo || (useShakaPlayer && !shakaFailed) || externalLoading) return;
 
-    // Cleanup
     if (artRef.current) {
       if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
       artRef.current.destroy(false);
@@ -193,27 +180,23 @@ export default function VideoPlayer({
     if (!videoUrl) return;
 
     const defaultSub = findIndoSubtitle(subtitles);
-
-    // ─── Settings ────────────────────────────────────────
     const settings: any[] = [];
 
-    // Quality (only MP4 downloads)
+    // Quality
     const mp4Qualities = (streamInfo.availableQualities || []).filter(q => q.resolution > 0);
     if (mp4Qualities.length > 1) {
       settings.push({
         html: 'Kualitas',
         tooltip: `${streamInfo.resolution || mp4Qualities[mp4Qualities.length - 1]?.resolution}p`,
-        selector: mp4Qualities.map((q, i) => ({
+        selector: mp4Qualities.map(q => ({
           html: `${q.resolution}p${q.resolution >= 1080 ? ' HD' : ''}`,
           _res: q.resolution,
-          default: q.resolution === streamInfo.resolution,
+          default: q.resolution === (streamInfo as any).resolution,
         })),
         onSelect(item: any) {
           const proxy = buildProxyUrl(srcRef.current, item._res);
           fetchStreamInfo(proxy).then(info => {
-            if (info?.url && artRef.current) {
-              artRef.current.switchQuality(info.url);
-            }
+            if (info?.url && artRef.current) artRef.current.switchQuality(info.url);
           });
           return item.html;
         },
@@ -223,8 +206,7 @@ export default function VideoPlayer({
     // Subtitle
     if (subtitles.length > 0) {
       settings.push({
-        html: 'Subtitle',
-        tooltip: defaultSub?.language || 'Off',
+        html: 'Subtitle', tooltip: defaultSub?.language || 'Off',
         selector: [
           { html: 'Off', default: !defaultSub },
           ...subtitles.map(sub => ({ html: sub.language, url: sub.url, default: sub === defaultSub })),
@@ -236,31 +218,14 @@ export default function VideoPlayer({
           return item.html;
         },
       });
-      settings.push({
-        html: 'Ukuran Subtitle', tooltip: SUB_SIZES.find(s => s.value === subSize)?.html || 'Sedang',
-        selector: SUB_SIZES.map(s => ({ html: s.html, _v: s.value, default: s.value === subSize })),
-        onSelect(item: any) { setSubSize(item._v); saveSub(item._v, subBg, subColor); artRef.current?.subtitle.style({ fontSize: item._v }); return item.html; },
-      });
-      settings.push({
-        html: 'Background Subtitle', tooltip: SUB_BGS.find(s => s.value === subBg)?.html || 'Tanpa Background',
-        selector: SUB_BGS.map(s => ({ html: s.html, _v: s.value, default: s.value === subBg })),
-        onSelect(item: any) { setSubBg(item._v); saveSub(subSize, item._v, subColor); artRef.current?.subtitle.style({ backgroundColor: item._v }); return item.html; },
-      });
-      settings.push({
-        html: 'Warna Subtitle', tooltip: SUB_COLORS.find(s => s.value === subColor)?.html || 'Putih',
-        selector: SUB_COLORS.map(s => ({ html: s.html, _v: s.value, default: s.value === subColor })),
-        onSelect(item: any) { setSubColor(item._v); saveSub(subSize, subBg, item._v); artRef.current?.subtitle.style({ color: item._v }); return item.html; },
-      });
+      settings.push({ html: 'Ukuran Subtitle', tooltip: SUB_SIZES.find(s => s.value === subSize)?.html || 'Sedang', selector: SUB_SIZES.map(s => ({ html: s.html, _v: s.value, default: s.value === subSize })), onSelect(item: any) { setSubSize(item._v); saveSub(item._v, subBg, subColor); artRef.current?.subtitle.style({ fontSize: item._v }); return item.html; } });
+      settings.push({ html: 'Background Subtitle', tooltip: SUB_BGS.find(s => s.value === subBg)?.html || 'Tanpa Background', selector: SUB_BGS.map(s => ({ html: s.html, _v: s.value, default: s.value === subBg })), onSelect(item: any) { setSubBg(item._v); saveSub(subSize, item._v, subColor); artRef.current?.subtitle.style({ backgroundColor: item._v }); return item.html; } });
+      settings.push({ html: 'Warna Subtitle', tooltip: SUB_COLORS.find(s => s.value === subColor)?.html || 'Putih', selector: SUB_COLORS.map(s => ({ html: s.html, _v: s.value, default: s.value === subColor })), onSelect(item: any) { setSubColor(item._v); saveSub(subSize, subBg, item._v); artRef.current?.subtitle.style({ color: item._v }); return item.html; } });
     }
 
-    // ─── Create ArtPlayer ────────────────────────────────
     const art = new Artplayer({
       container: containerRef.current!,
-      url: videoUrl,
-      poster: poster || '',
-      theme: '#8b5cf6',
-      volume: 0.8,
-      lang: 'en',
+      url: videoUrl, poster: poster || '', theme: '#8b5cf6', volume: 0.8, lang: 'en',
       hotkey: true, pip: true, fullscreen: true, fullscreenWeb: true,
       setting: true, playbackRate: true, aspectRatio: true,
       lock: true, gesture: true, fastForward: true,
@@ -279,7 +244,6 @@ export default function VideoPlayer({
           if (Hls.isSupported()) {
             const hls = new Hls({ enableWorker: true, maxBufferLength: 30 });
             hls.loadSource(url); hls.attachMedia(video);
-            hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) { if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad(); else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError(); } });
             (art as any)._hls = hls;
           } else if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = url; }
         },
@@ -292,8 +256,7 @@ export default function VideoPlayer({
       art.on('video:timeupdate', () => {
         const now = Math.floor(art.currentTime);
         if (now > 0 && now % 10 === 0 && now !== lastSave.current) {
-          lastSave.current = now;
-          onTimeUpdate(art.currentTime, art.duration);
+          lastSave.current = now; onTimeUpdate(art.currentTime, art.duration);
         }
       });
     }
@@ -301,15 +264,13 @@ export default function VideoPlayer({
     return () => {
       if (artRef.current) {
         if ((artRef.current as any)._hls) (artRef.current as any)._hls.destroy();
-        artRef.current.destroy(false);
-        artRef.current = null;
+        artRef.current.destroy(false); artRef.current = null;
       }
     };
-  }, [streamInfo, useWasmTranscode, externalLoading]);
+  }, [streamInfo, useShakaPlayer, shakaFailed, externalLoading]);
 
   // ─── Render ────────────────────────────────────────────────
 
-  // Loading state
   if (!src || externalLoading || resolving) {
     return (
       <div className={`relative w-full aspect-video bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center ${className}`}>
@@ -319,23 +280,26 @@ export default function VideoPlayer({
     );
   }
 
-  // HEVC WASM Transcode mode
-  if (useWasmTranscode && streamInfo?.dashUrl) {
+  // Shaka Player mode (DASH/HEVC)
+  if (useShakaPlayer && !shakaFailed && streamInfo?.dashUrl) {
     return (
       <div className={`relative w-full aspect-video bg-black rounded-xl overflow-hidden ${className}`}>
-        <H265DashPlayer
+        <ShakaPlayer
           manifestUrl={streamInfo.dashUrl}
           poster={poster}
-          preferredHeight={1080}
-          onReady={() => console.log('[VideoPlayer] H265 transcode ready')}
-          onError={(msg) => console.error('[VideoPlayer] H265 error:', msg)}
+          onReady={() => console.log('[VideoPlayer] Shaka ready')}
+          onError={(msg) => {
+            console.error('[VideoPlayer] Shaka failed:', msg);
+            // Fallback to ArtPlayer with MP4
+            setShakaFailed(true);
+          }}
           onTimeUpdate={onTimeUpdate}
         />
       </div>
     );
   }
 
-  // Normal ArtPlayer mode (MP4/HLS)
+  // ArtPlayer mode (MP4 / fallback)
   return (
     <div className={`relative w-full aspect-video rounded-xl overflow-hidden ${className}`}>
       <div ref={containerRef} className="w-full h-full" />
