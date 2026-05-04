@@ -252,7 +252,7 @@ export default function VideoPlayer({
       const art = new Artplayer({
         container: containerRef.current!,
         url: videoUrl,
-        type: videoType === 'mpd' ? 'mpd' : undefined,
+        ...(videoType === 'mpd' ? { type: 'mpd' } : {}),
         poster: poster || '',
         theme: '#8b5cf6',
         volume: 0.8,
