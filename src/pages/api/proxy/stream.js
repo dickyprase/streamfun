@@ -2,11 +2,11 @@ import { getApiClient } from '@/lib/api-client';
 
 /**
  * Stream URL resolver.
- *
- * Default: returns DASH proxy URL (processedSources[0].url) for ABR streaming.
- * Fallback: returns direct MP4 download URL.
- *
- * IMPORTANT: Use processedSources[0].url (proxy URL), NOT .streamUrl (needs CloudFront cookies).
+ * Returns:
+ * - MP4 direct download URL (always, as primary/fallback)
+ * - DASH manifest URL (if available, for HEVC transcode)
+ * - Codec info (hevc/h264)
+ * - Available qualities
  */
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -34,52 +34,57 @@ export default async function handler(req, res) {
   for (const strategy of strategies) {
     try {
       const data = await client.get(strategy.endpoint, strategy.params);
-      const result = extractBestSource(data, targetRes);
-      if (result) {
+      const downloads = (data.downloads || []).filter(d => d.url);
+      if (downloads.length === 0 && !(data.processedSources?.length > 0)) continue;
+
+      // Find MP4 URL (primary playback)
+      let mp4Url = '';
+      let mp4Resolution = 0;
+      if (targetRes) {
+        const match = downloads.find(d => d.resolution === targetRes);
+        if (match) { mp4Url = match.url; mp4Resolution = match.resolution; }
+      }
+      if (!mp4Url && downloads.length > 0) {
+        const best = [...downloads].sort((a, b) => (b.resolution || 0) - (a.resolution || 0))[0];
+        mp4Url = best.url;
+        mp4Resolution = best.resolution;
+      }
+
+      // Get DASH manifest URL (for HEVC transcode)
+      let dashUrl = '';
+      let dashCodec = '';
+      let dashResolutions = '';
+      if (data.processedSources?.length > 0) {
+        const ps = data.processedSources.sort((a, b) => (b.quality || 0) - (a.quality || 0))[0];
+        dashUrl = ps.url || ''; // proxy URL (handles CloudFront cookies)
+        dashCodec = ps.codecName || '';
+        dashResolutions = ps.resolutions || '';
+      }
+
+      // Determine codec of MP4 downloads
+      const mp4Codec = downloads[0]?.codecName || '';
+
+      if (mp4Url || dashUrl) {
         return res.status(200).json({
           success: true,
-          url: result.url,
-          type: result.type,
-          // Also return all available downloads for quality selector
-          downloads: (data.downloads || []).filter(d => d.url).map(d => ({
+          // Primary: MP4 direct (always works for h264, may work for hevc on some browsers)
+          url: mp4Url,
+          type: 'mp4',
+          resolution: mp4Resolution,
+          codec: mp4Codec,
+          // DASH info (for HEVC transcode if needed)
+          dashUrl,
+          dashCodec,
+          dashResolutions,
+          // All available MP4 downloads
+          availableQualities: downloads.map(d => ({
             resolution: d.resolution,
-            url: d.url,
+            codec: d.codecName || '',
           })),
-          hasDash: !!(data.processedSources?.length > 0),
-          dashResolutions: data.processedSources?.[0]?.resolutions || '',
         });
       }
     } catch {}
   }
 
   return res.status(404).json({ error: 'No video source found' });
-}
-
-function extractBestSource(data, targetResolution) {
-  if (!data) return null;
-  const downloads = (data.downloads || []).filter(d => d.url);
-  const processedSources = data.processedSources || [];
-
-  // If specific resolution requested as MP4
-  if (targetResolution) {
-    // Try exact MP4 match first
-    const mp4Match = downloads.find(d => d.resolution === targetResolution);
-    if (mp4Match) return { url: mp4Match.url, type: 'mp4' };
-  }
-
-  // Default: prefer DASH (ABR, highest quality)
-  // Use .url (proxy URL) NOT .streamUrl (needs CloudFront cookies)
-  if (processedSources.length > 0) {
-    const ps = processedSources.sort((a, b) => (b.quality || 0) - (a.quality || 0))[0];
-    const dashUrl = ps.url; // proxy URL - handles cookies server-side
-    if (dashUrl) return { url: dashUrl, type: 'mpd' };
-  }
-
-  // Fallback: highest resolution MP4
-  if (downloads.length > 0) {
-    const sorted = [...downloads].sort((a, b) => (b.resolution || 0) - (a.resolution || 0));
-    return { url: sorted[0].url, type: 'mp4' };
-  }
-
-  return null;
 }
